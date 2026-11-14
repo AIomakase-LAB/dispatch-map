@@ -45,18 +45,22 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
 
 (async () => {
   const browser = await chromium.launch();
-  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: false, permissions: [] });
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: false, permissions: ['geolocation'], geolocation: { latitude: 35.6812, longitude: 139.7671 } });
   await setup(ctx);
   const page = await ctx.newPage();
   const pageErrors = []; page.on('pageerror', e => pageErrors.push(e.message));
   await page.goto(INDEX);
   await page.waitForSelector('#setup:not([hidden])'); assert.match(await page.textContent('#setup'), /接続コード/); ok('未接続なら接続画面が出る');
-  await page.click('#btnLocal'); await page.waitForSelector('#ov.on');
+  await page.click('#btnLocal'); await page.waitForFunction(() => document.getElementById('setup').hidden);
+  assert.ok(!(await page.$('#ov.on')), '初回に設定モーダルは出ない'); ok('初回に事案名・隊名の入力を求めない(既定: 共通 / 自分)');
+  await page.waitForFunction(() => Math.abs(map.getCenter().lat - 35.6812) < 0.001 && Math.abs(map.getCenter().lng - 139.7671) < 0.001 && map.getZoom() >= 16);
+  ok('起動時に現在地を中心に表示(ズーム16以上)'); assert.ok(await page.$('.leaflet-interactive, path[stroke="#fff"]') !== undefined);
+  await page.click('#btnInc'); await page.waitForSelector('#ov.on');
 
   // 初回: 隊名未設定なら設定モーダルが出る
   await page.fill('#ov input >> nth=0', '事案A'); await page.fill('#ov input >> nth=1', '救急1隊'); await page.click('#ov .btns .pri');
   await page.waitForFunction(() => !document.querySelector('#ov.on'));
-  assert.match(await page.textContent('#btnInc'), /事案A \/ 救急1隊/); ok('初回の事案名・隊名設定');
+  assert.match(await page.textContent('#btnInc'), /事案A/); ok('設定から事案名・隊名を変更できる');
   assert.match(await page.textContent('#warn'), /現場の状況を優先/); ok('「現場の状況を優先すること」表示');
   assert.match(await page.textContent('#btnVeh'), /救急車/); ok('標準車両は救急車');
 
@@ -99,22 +103,26 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
 
   // 出発・目標(各1つ)
   await page.click('[data-mode=start]'); await tap(page, 0.2, 0.8);
-  mocks.overpass.length = 0;
+  mocks.overpass.length = 0; mocks.valhalla.length = 0;
   await page.click('[data-mode=goal]'); await tap(page, 0.5, 0.5);
-  await page.waitForSelector('.fd.red'); 
+  await page.waitForFunction(() => document.querySelector('#sheet .sum')); await page.waitForSelector('.fd.red');
+  assert.equal(mocks.valhalla.length, 1); ok('目標地点をタップすると自動で経路検索される(設定済みの出発地点から)');
   await page.click('[data-mode=start]'); await tap(page, 0.25, 0.85);
   let all = (await items(page)).filter(r => !r.deleted);
   assert.equal(all.filter(r => r.type === 'start').length, 1); assert.equal(all.filter(r => r.type === 'goal').length, 1); ok('出発・目標は事案につき1つ(再設定は置換)');
 
-  // Overpass 自動検索
+  // Overpass: 経路沿い(自動) → 経路を消して「注意」ボタンで周囲600m
+  assert.ok(decodeURIComponent(mocks.overpass[0].body).includes('around:30,')); ok('経路検索後は経路沿い30mで自動検索');
+  await page.click('#sheet .find:has-text("経路を消す")'); mocks.overpass.length = 0; await page.click('#act-check'); await page.waitForSelector('.fd.red');
+  await page.click('#sheet .tabs button:has-text("注意箇所")');
   const q = decodeURIComponent(mocks.overpass[0].body.replace(/^data=/, ''));
   assert.equal(mocks.overpass[0].method, 'POST'); assert.match(mocks.overpass[0].ct, /x-www-form-urlencoded/);
   for (const w of ['around:600', 'maxwidth', 'maxheight', '"width"', 'barrier', 'access', 'motor_vehicle']) assert.ok(q.includes(w), w);
-  ok('目標設定でOverpass(半径600m, 必要タグ, プリフライト不要のform POST)');
+  ok('「注意」ボタンで周囲600mを検索(必要タグ・プリフライト不要のform POST)');
   const red = await page.$$('.fd.red'), org = await page.$$('.fd.orange');
   assert.equal(red.length, 3); assert.equal(org.length, 3); ok(`判定: 赤${red.length}/橙${org.length}(期待どおり。問題なしの1件は非表示)`);
   assert.ok((await page.textContent('#sheet')).includes('通行困難')); await page.screenshot({ path: SHOT + '/shot-findings.png' });
-  await page.click('#sheet .find >> nth=0'); await page.waitForTimeout(900); assert.ok(await page.$('.leaflet-popup')); ok('一覧タップで該当箇所へ移動しポップアップ');
+  await page.click('#sheet .find:has(.badge) >> nth=0'); await page.waitForTimeout(900); assert.ok(await page.$('.leaflet-popup')); ok('一覧タップで該当箇所へ移動しポップアップ');
 
   // 経路検索
   await page.click('#act-route'); await page.waitForTimeout(1500); await page.waitForFunction(() => document.querySelector('#sheet .sum'));
@@ -130,7 +138,7 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   // 共有同期: 同じコンテキストの別ページ(別端末の代用)
   const p2 = await ctx.newPage(); await p2.goto(INDEX); await p2.waitForSelector('.albl');
   assert.equal((await p2.$$('.albl')).length, 2); ok('別ページでも同じ事案のデータが表示される(localStorage)');
-  await page.click('[data-mode=memo]'); await tap(page, 0.1, 0.55); await page.waitForSelector('#ov.on'); await answer(page, '同期テスト');
+  await page.click('[data-mode=memo]'); await tap(page, 0.1, 0.3); await page.waitForSelector('#ov.on'); await answer(page, '同期テスト');
   await p2.waitForFunction(() => [...document.querySelectorAll('.leaflet-tooltip')].some(e => e.textContent === '同期テスト'), null, { timeout: 12000 }); ok('約8秒ポーリングで他ページの追加が反映');
 
   // タップで削除 → 他ページへ反映
@@ -184,7 +192,7 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   gasDown = true; await A.fill('#connCode', code); await A.click('#btnConnect'); await A.waitForFunction(() => /サーバーに接続できません/.test(document.querySelector('#setupMsg').textContent)); assert.ok(await A.isVisible('#setupMsg')); assert.equal(await A.textContent('#btnConnect'), '接続'); gasDown = false; ok('サーバーに届かないときは原因の候補つきで画面に表示され、再度押せる');
   const badKey = Buffer.from(JSON.stringify({ u: JSON.parse(Buffer.from(code.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString()).u, k: 'wrongkey' })).toString('base64');
   await A.fill('#connCode', badKey); await A.click('#btnConnect'); await A.waitForFunction(() => /接続コードが違います/.test(document.querySelector('#setupMsg').textContent)); ok('キー違いは「接続コードが違います」(接続画面に表示)');
-  await A.fill('#connCode', code); await A.click('#btnConnect'); await A.waitForSelector('#ov.on');
+  await A.fill('#connCode', code); await A.click('#btnConnect'); await A.waitForFunction(() => document.getElementById('setup').hidden); await A.click('#btnInc'); await A.waitForSelector('#ov.on');
   await A.fill('#ov input >> nth=0', '火災出動'); await A.fill('#ov input >> nth=1', '指揮隊'); await A.click('#ov .btns .pri'); await A.waitForFunction(() => !document.querySelector('#ov.on'));
   assert.match(await A.textContent('#sync'), /同期済み/); ok('接続コードで接続・同期済み表示');
   await A.click('[data-mode=memo]'); await tap(A, 0.4, 0.4); await A.waitForSelector('#ov.on'); await answer(A, '消火栓あり');
@@ -192,7 +200,7 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   let rows = gas.sheet('items')._dump().slice(1); assert.equal(rows.length, 1); assert.equal(rows[0][1], '火災出動'); assert.equal(rows[0][4], '指揮隊'); assert.equal(JSON.parse(rows[0][3]).text, '消火栓あり'); ok('書き込みがスプレッドシート(items)に保存される(隊名・事案名つき)');
   assert.ok(!gasReqs.some(r => r.method === 'OPTIONS')); assert.ok(gasReqs.every(r => /text\/plain/.test(r.ct || 'text/plain'))); ok('API通信はプリフライトなしの単純リクエスト');
   const dev2 = await device(), B = dev2.pg;
-  await B.fill('#connCode', code); await B.click('#btnConnect'); await B.waitForSelector('#ov.on');
+  await B.fill('#connCode', code); await B.click('#btnConnect'); await B.waitForFunction(() => document.getElementById('setup').hidden); await B.click('#btnInc'); await B.waitForSelector('#ov.on');
   await B.fill('#ov input >> nth=0', '火災出動'); await B.fill('#ov input >> nth=1', '救急2隊'); await B.click('#ov .btns .pri'); await B.waitForFunction(() => !document.querySelector('#ov.on'));
   await B.waitForFunction(() => [...document.querySelectorAll('.leaflet-tooltip')].some(e => e.textContent === '消火栓あり')); ok('別端末(別コンテキスト)に共有データが表示される');
   // 別端末で追加 → A に約8秒で反映 / 別端末で削除 → A から消える
@@ -213,6 +221,22 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   await A.click('#btnInc'); await A.click('#ov .chips button:has-text("この事案のデータを削除")'); await A.click('#ov .btns .pri'); await A.waitForFunction(() => /を削除しました/.test(document.querySelector('#toast').textContent));
   assert.equal(gas.sheet('items')._dump().slice(1).filter(r => r[6] !== true && r[6] !== 'TRUE').length, 0); ok('設定から事案のデータを削除できる');
   await dev1.c.close(); await dev2.c.close();
+
+
+  // ================= Googleマップのように使う =================
+  const g1 = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['geolocation'], geolocation: { latitude: 34.7024, longitude: 135.4959 } }); await setup(g1);
+  const P = await g1.newPage(); await P.goto(INDEX); await P.click('#btnLocal'); await P.waitForFunction(() => Math.abs(map.getCenter().lat - 34.7024) < 0.001);
+  mocks.valhalla.length = 0;
+  await P.click('[data-mode=goal]'); await tap(P, 0.6, 0.4); await P.waitForFunction(() => document.querySelector('#sheet .sum'));
+  const r1 = JSON.parse(new URL(mocks.valhalla[0]).searchParams.get('json'));
+  assert.ok(Math.abs(r1.locations[0].lat - 34.7024) < 1e-4 && Math.abs(r1.locations[0].lon - 135.4959) < 1e-4); assert.match(await P.textContent('#sheet'), /出発: 現在地/);
+  assert.equal((await items(P)).filter(r => r.type === 'start').length, 0); ok('出発地点を置かなくても、目標をタップするだけで現在地から経路が出る(出発地点は保存されない)');
+  await g1.close();
+  const g2 = await browser.newContext({ viewport: { width: 390, height: 844 } }); await setup(g2);
+  const Q = await g2.newPage(); await Q.goto(INDEX); await Q.click('#btnLocal'); await Q.waitForFunction(() => document.getElementById('setup').hidden);
+  await Q.waitForFunction(() => /現在地を取得できません/.test(document.querySelector('#toast').textContent)); assert.ok(await Q.isVisible('#toast'));
+  await Q.click('[data-mode=memo]'); await tap(Q, 0.5, 0.5); await Q.waitForSelector('#ov.on'); await answer(Q, '位置情報なしでも使える'); assert.equal((await items(Q)).length, 1); ok('位置情報が許可されなくても、メッセージを出して通常どおり使える');
+  await g2.close();
 
   await page.screenshot({ path: SHOT + '/shot-main.png' });
   assert.deepEqual(pageErrors, []); ok('JSの未捕捉エラーなし');

@@ -18,7 +18,7 @@ const CONFIG = {
   // barrier の分類。RED=通れない可能性が高い / ORANGE=要確認(解錠・開放で通れる場合あり)
   BARRIER_RED: ['bollard', 'block', 'jersey_barrier'],
   BARRIER_ORANGE: ['gate', 'lift_gate', 'swing_gate', 'chain', 'height_restrictor', 'bump_gate', 'sliding_gate'],
-  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1' },
+  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1', lastpos: 'dm_lastpos' },
 };
 
 /* =====================================================================
@@ -172,8 +172,8 @@ function setSync(s) { sync = s; updateInfo(); }
 
 /* ===== 状態 ===== */
 const state = {
-  incident: lsGet(CONFIG.LS.incident) || '事案1',
-  author: lsGet(CONFIG.LS.author) || '',
+  incident: lsGet(CONFIG.LS.incident) || '共通',
+  author: lsGet(CONFIG.LS.author) || '自分',
 };
 let vehicles = loadVehicles();
 const items = new Map();     // id → row
@@ -208,7 +208,8 @@ if (typeof L === 'undefined') {
   document.body.append(h('div', { class: 'fatal' }, '地図ライブラリ(Leaflet)を読み込めませんでした。通信状況を確認して再読み込みしてください。'));
   throw new Error('Leaflet not loaded');
 }
-const map = L.map('map', { zoomControl: false, center: CONFIG.DEFAULT_CENTER, zoom: CONFIG.DEFAULT_ZOOM, tap: false });
+const lastPos = (() => { try { const p = JSON.parse(lsGet(CONFIG.LS.lastpos) || 'null'); return p && isFinite(p[0]) && isFinite(p[1]) ? p : null; } catch (e) { return null; } })();
+const map = L.map('map', { zoomControl: false, center: lastPos || CONFIG.DEFAULT_CENTER, zoom: CONFIG.DEFAULT_ZOOM, tap: false });
 L.control.zoom({ position: 'topright' }).addTo(map);
 L.control.scale({ imperial: false }).addTo(map);
 const tiles = L.tileLayer(CONFIG.TILE_URL, { maxZoom: 19, attribution: '© OpenStreetMap contributors' }).addTo(map);
@@ -339,7 +340,7 @@ async function handleTap(ll) {
   if (mode === 'start' || mode === 'goal') {
     const t = mode; setMode(null);
     const ok = await commit(t, { pos: ll }, t + ':' + state.incident);
-    if (ok && t === 'goal') runCheck('around');
+    if (ok && t === 'goal') { if (!await runRoute()) runCheck('around'); }
     return;
   }
   if (mode === 'memo') {
@@ -469,7 +470,7 @@ async function openVehicle() {
 
 function updateInfo() {
   const v = getVehicle(), miss = missingDims(v);
-  $('#btnInc').textContent = `${state.incident} / ${state.author || '隊名未設定'}`;
+  $('#btnInc').textContent = `⚙ ${state.incident}`;
   $('#btnVeh').textContent = `🚒 ${v.name}${miss.length ? ' ⚠' : ''}`;
   const n = outbox.length;
   const label = isLocal() ? 'ローカル' : sync === 'busy' ? '同期中' : sync === 'off' ? (n ? `未送信 ${n}件` : 'オフライン') : '同期済み';
@@ -504,24 +505,31 @@ async function poll() {
 }
 
 /* ===== 現在地 ===== */
-function locate() {
-  const fail = why => {
-    setError('現在地', `現在地を取得できません(${why})。地図をタップして出発地点を指定してください。`);
-    setMode('start');
-  };
-  if (!navigator.geolocation) return fail('この端末では未対応');
-  toast('現在地を取得中…');
-  navigator.geolocation.getCurrentPosition(async pos => {
-    clearError('現在地');
-    const ll = [r6(pos.coords.latitude), r6(pos.coords.longitude)];
-    if (meLayer) map.removeLayer(meLayer);
-    meLayer = L.layerGroup([L.circle(ll, { radius: pos.coords.accuracy, weight: 1, interactive: false }),
-      L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: '#2b7de9', fillOpacity: 1, interactive: false })]).addTo(map);
-    map.setView(ll, Math.max(map.getZoom(), 16));
-    if (!getItem('start')) { await commit('start', { pos: ll }, 'start:' + state.incident); toast('現在地を出発地点に設定しました'); }
-    else toast('現在地を表示しました(出発地点は設定済み)');
-  }, err => fail(err.code === 1 ? '許可されていません' : err.code === 3 ? 'タイムアウト' : '位置を特定できません'),
-  { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 });
+/**
+ * 現在地を取得して青い点で表示する。成功すると座標、失敗すると null を返す。
+ * silent: 起動時など。失敗しても出発地点モードにはしない。 center: false なら地図は動かさない。
+ */
+function locate({ silent = false, center = true } = {}) {
+  return new Promise(resolve => {
+    const fail = why => {
+      if (silent) toast(`現在地を取得できません(${why})`);
+      else { setError('現在地', `現在地を取得できません(${why})。地図をタップして出発地点を指定してください。`); setMode('start'); }
+      resolve(null);
+    };
+    if (!navigator.geolocation) return fail('この端末では未対応');
+    if (!silent) toast('現在地を取得中…');
+    navigator.geolocation.getCurrentPosition(pos => {
+      clearError('現在地');
+      const ll = [r6(pos.coords.latitude), r6(pos.coords.longitude)];
+      jset(CONFIG.LS.lastpos, ll);
+      if (meLayer) map.removeLayer(meLayer);
+      meLayer = L.layerGroup([L.circle(ll, { radius: pos.coords.accuracy, weight: 1, interactive: false }),
+        L.circleMarker(ll, { radius: 8, color: '#fff', weight: 3, fillColor: '#2b7de9', fillOpacity: 1, interactive: false })]).addTo(map);
+      if (center) map.setView(ll, Math.max(map.getZoom(), 16));
+      resolve(ll);
+    }, err => fail(err.code === 1 ? '位置情報の利用が許可されていません' : err.code === 3 ? 'タイムアウト' : '位置を特定できません'),
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 });
+  });
 }
 
 /* =====================================================================
@@ -663,11 +671,11 @@ function decodePolyline6(str) {
   }
   return out;
 }
-function buildRouteRequest() {
-  const s = getItem('start'), g = getItem('goal'), veh = getVehicle();
+function buildRouteRequest(startPos) {
+  const g = getItem('goal'), veh = getVehicle();
   const truck = {}; for (const d of DIM_KEYS) if (veh[d.k] != null) truck[d.k] = veh[d.k];   // m / t
   const req = {
-    locations: [{ lat: s.data.pos[0], lon: s.data.pos[1] }, { lat: g.data.pos[0], lon: g.data.pos[1] }],
+    locations: [{ lat: startPos[0], lon: startPos[1] }, { lat: g.data.pos[0], lon: g.data.pos[1] }],
     costing: 'truck', costing_options: { truck }, directions_options: { language: 'ja-JP', units: 'kilometers' },
   };
   const polys = [...items.values()].filter(r => r.type === 'area' && r.data.points.length >= 3)
@@ -675,9 +683,17 @@ function buildRouteRequest() {
   if (polys.length) req.exclude_polygons = polys;
   return req;
 }
+/** 経路検索。出発は、設定した出発地点があればそこから、なければ現在地から。成功したら true。 */
 async function runRoute() {
-  if (!getItem('start') || !getItem('goal')) { toast('出発地点と目標地点を設定してください'); return; }
-  const req = buildRouteRequest();
+  if (!getItem('goal')) { toast('目標地点を地図でタップしてください'); setMode('goal'); return false; }
+  const st = getItem('start');
+  let startPos = st ? st.data.pos : null;
+  if (!startPos) {
+    toast('現在地を取得中…', 12000);
+    startPos = await locate({ silent: true, center: false });
+    if (!startPos) { toast('現在地を取得できません。出発地点を地図タップで指定してください'); setMode('start'); return false; }
+  }
+  const req = buildRouteRequest(startPos);
   toast('経路検索中…', 30000);
   try {
     const url = `${CONFIG.VALHALLA_ROUTE_URL}?json=${encodeURIComponent(JSON.stringify(req))}`;
@@ -687,12 +703,13 @@ async function runRoute() {
     if (!leg) throw new Error('経路が見つかりませんでした');
     clearRoute();
     route = { shape: decodePolyline6(leg.shape), distKm: trip.summary.length, sec: trip.summary.time,
-      steps: leg.maneuvers.map(m => ({ text: m.instruction, km: m.length, sec: m.time })), excluded: (req.exclude_polygons || []).length, veh: getVehicle() };
+      steps: leg.maneuvers.map(m => ({ text: m.instruction, km: m.length, sec: m.time })), excluded: (req.exclude_polygons || []).length, veh: getVehicle(), fromCurrent: !st };
     routeLayer = L.polyline(route.shape, { color: '#1b5e20', weight: 7, opacity: 0.85, interactive: false }).addTo(map);
     map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
     clearError('Valhalla'); showSheet('route');
     runCheck('route', true);    // 経路案内タブは開いたまま、経路沿いの注意箇所を更新
-  } catch (e) { setError('Valhalla', `経路検索に失敗しました: ${e.message}`); toast('経路検索に失敗しました'); }
+    return true;
+  } catch (e) { setError('Valhalla', `経路検索に失敗しました: ${e.message}`); toast('経路検索に失敗しました'); return false; }
 }
 function clearRoute() { if (routeLayer) map.removeLayer(routeLayer); routeLayer = null; route = null; }
 
@@ -717,7 +734,7 @@ function renderSheet() {
   } else if (!route) body.append(h('div', { class: 'note' }, '出発・目標地点を設定して「経路」を押してください。'));
   else {
     body.append(h('div', { class: 'sum' }, `${route.distKm.toFixed(1)} km / 約${Math.max(1, Math.round(route.sec / 60))}分`),
-      h('div', { class: 'note' }, `車両: ${route.veh.name}${missingDims(route.veh).length ? `(${missingDims(route.veh).join('・')}未入力: 経路計算に未反映)` : ''} / 回避した通行不可エリア: ${route.excluded}件`),
+      h('div', { class: 'note' }, `出発: ${route.fromCurrent ? '現在地' : '設定した出発地点'} / 車両: ${route.veh.name}${missingDims(route.veh).length ? `(${missingDims(route.veh).join('・')}未入力: 経路計算に未反映)` : ''} / 回避した通行不可エリア: ${route.excluded}件`),
       h('ol', { class: 'steps' }, route.steps.map(s => h('li', {}, `${s.text}`, s.km ? ` (${fmtDist(s.km * 1000)})` : ''))),
       h('button', { class: 'find', onclick: () => { clearRoute(); renderSheet(); } }, '経路を消す'));
   }
@@ -729,7 +746,7 @@ function renderSheet() {
 
 /* ===== 画面下部ツールバー ===== */
 const DRAW_BTNS = [['arrow', '➤', '進入'], ['area', '⛔', '通行不可'], ['line', '〰', '線'], ['memo', '📌', 'メモ'], ['start', '🟢', '出発'], ['goal', '🎯', '目標']];
-const ACT_BTNS = [['locate', '📍', '現在地', locate], ['route', '🛣', '経路', runRoute], ['check', '⚠', '注意', () => runCheck(route ? 'route' : 'around')],
+const ACT_BTNS = [['locate', '📍', '現在地', () => locate()], ['route', '🛣', '経路', runRoute], ['check', '⚠', '注意', () => runCheck(route ? 'route' : 'around')],
   ['veh', '🚒', '車両', openVehicle], ['list', '📋', '一覧', () => showSheet(sheetTab || (route ? 'route' : 'check'))], ['set', '⚙', '設定', () => openSettings(false)]];
 $('#rowDraw').append(...DRAW_BTNS.map(([m, ic, tx]) => h('button', { class: 'tb', 'data-mode': m, onclick: () => setMode(m) }, h('span', { class: 'ic' }, ic), tx)));
 $('#rowAct').append(...ACT_BTNS.map(([id, ic, tx, fn]) => h('button', { class: 'tb', id: 'act-' + id, onclick: fn }, h('span', { class: 'ic' }, ic), tx)));
@@ -786,17 +803,20 @@ function switchIncidentClean() {
 let timerStarted = false;
 async function start() {
   $('#setup').hidden = true;
-  if (!state.author) await openSettings(true);
   if (!isLocal()) applyRows(jget(CONFIG.LS.cache, {})[state.incident] || []);
   updateInfo();
-  await poll();
-  const pts = [getItem('goal'), getItem('start')].filter(Boolean).map(x => x.data.pos);
-  if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.5), { maxZoom: 17 });
   if (!timerStarted) {
     timerStarted = true;
     setInterval(poll, CONFIG.POLL_MS);
     document.addEventListener('visibilitychange', () => { if (!document.hidden) poll(); });
     window.addEventListener('online', poll);
+  }
+  poll();
+  // 起動時は現在地を表示する(取得できなければ前回の位置、なければ既定の位置のまま)
+  const here = await locate({ silent: true });
+  if (!here && !lastPos) {
+    const pts = [getItem('goal'), getItem('start')].filter(Boolean).map(x => x.data.pos);
+    if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.5), { maxZoom: 17 });
   }
 }
 $('#sync').onclick = () => { toast('同期します…'); poll(); };
