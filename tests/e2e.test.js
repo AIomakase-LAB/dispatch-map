@@ -190,10 +190,11 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
       const cors = { 'access-control-allow-origin': '*' };
       if (req.method() === 'OPTIONS') return r.fulfill({ status: 204, headers: { ...cors, 'access-control-allow-headers': '*' } });
       if (gasDown) return r.abort('failed');
+      { const b0 = JSON.parse(req.postData()); if (oldApi && b0.action === 'saveItem' && b0.payload.item.incident === 'マイマップ') return r.fulfill({ status: 200, headers: cors, contentType: 'application/json', body: JSON.stringify({ ok: false, error: 'type が正しくありません: ' + b0.payload.item.type }) }); }
       r.fulfill({ status: 200, headers: cors, contentType: 'application/json', body: JSON.stringify(gas.post(JSON.parse(req.postData()))) });
     });
   };
-  let gasDown = false;
+  let gasDown = false, oldApi = false;
   async function device() { const c = await browser.newContext({ viewport: { width: 390, height: 844 } }); await setup(c); await gasRoute(c); const pg = await c.newPage(); await pg.goto(INDEX); return { c, pg }; }
   const dev1 = await device(), A = dev1.pg;
   await A.waitForSelector('#setup:not([hidden])');
@@ -229,6 +230,11 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   // 事案の削除
   await A.click('#btnInc'); await A.click('#ov .chips button:has-text("この事案のデータを削除")'); await A.click('#ov .btns .pri'); await A.waitForFunction(() => /を削除しました/.test(document.querySelector('#toast').textContent));
   assert.equal(gas.sheet('items')._dump().slice(1).filter(r => r[6] !== true && r[6] !== 'TRUE').length, 0); ok('設定から事案のデータを削除できる');
+  // ---- API が未更新(新しい種類を知らない)のときは、記録を捨てずに送信待ちで残し、更新後に自動で送る ----
+  oldApi = true; await A.evaluate(() => commitMy('water', { pos: [35.69, 139.77], label: '古いAPIテスト' }));
+  await A.waitForFunction(() => /未送信 1件/.test(document.querySelector('#sync').textContent)); assert.match(await A.textContent('#errors'), /未対応/); assert.equal(gas.sheet('items')._dump().slice(1).filter(r => r[2] === 'water').length, 0);
+  oldApi = false; await A.click('#sync'); await A.waitForFunction(() => /同期済み/.test(document.querySelector('#sync').textContent), null, { timeout: 15000 });
+  assert.equal(gas.sheet('items')._dump().slice(1).filter(r => r[2] === 'water').length, 1); ok('API が新しい種類に未対応でも記録は捨てられず、API の更新後に自動で送られる');
   // ---- マイマップは接続モードでスプレッドシートに保存される ----
   await A.evaluate(() => commitMy('hydrant', { pos: [35.68, 139.76], label: 'テスト栓' }));
   await A.waitForFunction(() => /同期済み/.test(document.querySelector('#sync').textContent));

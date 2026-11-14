@@ -181,6 +181,8 @@ async function flush() {
         await api('saveItem', { item: row });
         outbox = outbox.filter(r => r !== row); jset(CONFIG.LS.outbox, outbox);
       } catch (e) {
+        // API がまだ新しい種類(マイマップなど)に対応していないときは、記録を捨てずに送信待ちのまま残す(API の更新後に自動で送る)
+        if (/type が正しくありません|マイマップにだけ|事案名に使えません/.test(e.message) && MY_TYPES.includes(row.type)) { e.network = true; e.message = 'API が新しい記録の種類に未対応です(API を更新すると自動で送信されます)'; }
         if (e.network || e.auth) throw e;
         toast(e.message, true);                  // 入力内容のエラー: この1件だけ捨てる
         outbox = outbox.filter(r => r !== row); jset(CONFIG.LS.outbox, outbox);
