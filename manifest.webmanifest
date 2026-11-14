@@ -1,0 +1,15 @@
+{
+  "name": "出動支援マップ",
+  "short_name": "出動マップ",
+  "description": "出動時の進入方向・通行不可エリア・車両別の通行注意箇所を地図に書き込む",
+  "lang": "ja",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1b1f27",
+  "theme_color": "#7a1c1c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

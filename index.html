@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <title>出動支援マップ</title>
+  <meta name="description" content="出動時の進入方向・通行不可エリア・車両別の通行注意箇所を地図に書き込む">
+  <meta name="theme-color" content="#7a1c1c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="出動マップ">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="warn">⚠ 現場の状況を優先すること(地図データ=OSMに登録された規制しか検出できません)</div>
+<div id="info">
+  <button id="btnInc" aria-label="事案・隊名・接続の設定"></button>
+  <button id="btnVeh" aria-label="車両の設定"></button>
+  <button id="sync" aria-label="今すぐ同期"></button>
+</div>
+<div id="mapwrap">
+  <div id="map"></div>
+  <div id="errors" hidden></div>
+  <div id="sheet" hidden></div>
+  <div id="toast" hidden></div>
+</div>
+<div id="pending"><div class="hint" id="hint"></div></div>
+<div id="bar">
+  <div class="row" id="rowDraw"></div>
+  <div class="row" id="rowAct"></div>
+</div>
+<div id="setup" hidden></div>
+<div id="ov"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
