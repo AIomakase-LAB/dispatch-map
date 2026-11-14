@@ -1,6 +1,6 @@
 // アプリ本体と Leaflet をキャッシュして、圏外でも起動できるようにする。
 // データ通信 (script.google.com)、地図タイル、Overpass、Valhalla には関与しない。
-const CACHE = 'dispatch-map-v1.1.0';
+const CACHE = 'dispatch-map-v1.1.1';
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 const LEAFLET = ['https://unpkg.com/leaflet@1.9.4/dist/leaflet.css', 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'];

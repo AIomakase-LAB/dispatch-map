@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- 地図タイル風の背景: 街区・公園・川・道路に、経路(青)と目的地ピン(赤) -->
+  <rect width="512" height="512" fill="#f4efe4"/>
+  <path d="M0 0H210V150H0Z" fill="#cde7c0"/>
+  <path d="M330 330C380 300 440 330 512 300V512H300C310 440 280 370 330 330Z" fill="#a9d3f0"/>
+  <g fill="#e6dfd0"><rect x="236" y="24" width="120" height="96" rx="8"/><rect x="392" y="24" width="96" height="96" rx="8"/><rect x="24" y="190" width="96" height="110" rx="8"/><rect x="150" y="226" width="110" height="74" rx="8"/><rect x="30" y="350" width="130" height="130" rx="8"/></g>
+  <g stroke="#d9d2c2" stroke-width="30" stroke-linecap="round" fill="none"><path d="M-10 160H530"/><path d="M200 -10V530"/><path d="M-10 330L530 250"/></g>
+  <g stroke="#ffffff" stroke-width="22" stroke-linecap="round" fill="none"><path d="M-10 160H530"/><path d="M200 -10V530"/><path d="M-10 330L530 250"/></g>
+  <g stroke="#ffffff" stroke-width="10" stroke-linecap="round" fill="none"><path d="M360 -10V150"/><path d="M60 330V530"/><path d="M200 420H300"/></g>
+  <!-- 経路 -->
+  <path d="M70 450C70 340 200 400 200 290C200 220 330 250 330 190" stroke="#ffffff" stroke-width="40" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <path d="M70 450C70 340 200 400 200 290C200 220 330 250 330 190" stroke="#2b7de9" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="70" cy="450" r="26" fill="#fff"/><circle cx="70" cy="450" r="15" fill="#2b7de9"/>
+  <!-- 目的地ピン -->
+  <ellipse cx="330" cy="196" rx="34" ry="10" fill="#000" opacity=".2"/>
+  <path d="M330 190C292 150 280 130 280 104C280 72 302 50 330 50C358 50 380 72 380 104C380 130 368 150 330 190Z" fill="#d62828" stroke="#fff" stroke-width="10" stroke-linejoin="round"/>
+  <circle cx="330" cy="104" r="20" fill="#fff"/>
+</svg>
