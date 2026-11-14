@@ -33,6 +33,8 @@ async function setup(ctx) {
   });
   await ctx.route('**/valhalla1.openstreetmap.de/**', r => {
     mocks.valhalla.push(r.request().url());
+    const rq0 = JSON.parse(new URL(r.request().url()).searchParams.get('json') || '{}');
+    if (mocks.v442 && (rq0.exclude_polygons || []).length) return r.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error_code: 442, error: 'No path could be found for input' }) });
     r.fulfill({ contentType: 'application/json', body: JSON.stringify({ trip: { summary: { length: 1.23, time: 300 }, legs: [{
       shape: enc6([[35.680, 139.766], [35.683, 139.766], [35.683, 139.769], [35.686, 139.769]]),
       maneuvers: [{ instruction: '北東に進む', type: 1, begin_shape_index: 0, length: 0.33, time: 60 }, { instruction: '右折です', type: 10, begin_shape_index: 1, length: 0.27, time: 60 }, { instruction: '左折です', type: 15, begin_shape_index: 2, length: 0.33, time: 60 }, { instruction: '目的地に到着です', type: 4, begin_shape_index: 3, length: 0, time: 0 }] }] } }) });
@@ -220,7 +222,72 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   // 事案の削除
   await A.click('#btnInc'); await A.click('#ov .chips button:has-text("この事案のデータを削除")'); await A.click('#ov .btns .pri'); await A.waitForFunction(() => /を削除しました/.test(document.querySelector('#toast').textContent));
   assert.equal(gas.sheet('items')._dump().slice(1).filter(r => r[6] !== true && r[6] !== 'TRUE').length, 0); ok('設定から事案のデータを削除できる');
+  // ---- マイマップは接続モードでスプレッドシートに保存される ----
+  await A.evaluate(() => commitMy('hydrant', { pos: [35.68, 139.76], label: 'テスト栓' }));
+  await A.waitForFunction(() => /同期済み/.test(document.querySelector('#sync').textContent));
+  const myRows = gas.sheet('items')._dump().slice(1).filter(r => r[2] === 'hydrant'); assert.equal(myRows.length, 1); assert.equal(myRows[0][1], 'マイマップ'); ok('マイマップの記録はスプレッドシートに「マイマップ」として保存される');
   await dev1.c.close(); await dev2.c.close();
+
+
+  // ================= マイマップ(普段の記録) =================
+  const gm = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['geolocation'], geolocation: { latitude: 35.6801, longitude: 139.7660 } }); await setup(gm);
+  const M = await gm.newPage(); await M.goto(INDEX); await M.click('#btnLocal'); await M.waitForFunction(() => Math.abs(map.getCenter().lat - 35.6801) < 0.001);
+  assert.equal((await M.$$('#rowDraw .tb')).length, 6); await M.click('#toolset button[data-set=mymap]');
+  assert.equal((await M.$$('#rowDraw .tb')).length, 5);
+  const labels = (await M.$$eval('#rowDraw .tb', b => b.map(x => x.textContent))).join('|'); for (const w of ['消火栓', '水利', '狭い道', '危険個所', '進入経路']) assert.ok(labels.includes(w), w);
+  ok('「マイマップ」に切り替えると、消火栓・水利・狭い道・危険個所・進入経路の5つのボタンが出る');
+  const form = async (fn) => { await M.waitForSelector('#ov.on'); await fn(); await M.click('#ov .btns .pri'); await M.waitForFunction(() => !document.querySelector('#ov.on')); };
+  await M.click('[data-mode=hydrant]'); await tap(M, 0.3, 0.3); await form(() => M.click('#ov .chips button:has-text("地上式")'));
+  await tap(M, 0.35, 0.3); await form(() => M.click('#ov .chips button:has-text("地下式")')); assert.ok(await M.isVisible('#pending.on')); ok('消火栓は続けて何か所でも記録できる');
+  await M.click('#btnCancel'); await M.click('[data-mode=water]'); await tap(M, 0.6, 0.3); await form(() => M.click('#ov .chips button:has-text("河川")')); await M.click('#btnCancel');
+  await M.click('[data-mode=narrow]'); await tap(M, 0.2, 0.5); await tap(M, 0.3, 0.5); await tap(M, 0.4, 0.55); await M.click('#btnOk');
+  await form(async () => { await M.fill('#ov input[type=number]', '2.0'); await M.click('#ov .chips button:has-text("すれ違い不可")'); });
+  await M.click('[data-mode=hazard]'); await tap(M, 0.7, 0.6); await M.waitForSelector('#ov.on'); assert.equal(await M.isChecked('#ov input[type=checkbox]'), true); ok('危険個所は「経路検索で避ける」が初期オン');
+  await form(async () => { await M.click('#ov .chips button:has-text("落石")'); await M.fill('#ov input[type=number]', '30'); });
+  await M.click('[data-mode=approach]'); await tap(M, 0.2, 0.8); await tap(M, 0.5, 0.75); await M.click('#btnOk'); await form(() => M.click('#ov .chips button:has-text("自宅")'));
+  const mine = (await items(M)).filter(r => !r.deleted); assert.deepEqual(mine.map(r => r.type).sort(), ['approach', 'hazard', 'hydrant', 'hydrant', 'narrow', 'water']); assert.ok(mine.every(r => r.incident === 'マイマップ'));
+  const nw = mine.find(r => r.type === 'narrow').data; assert.equal(nw.width, 2); assert.equal(nw.avoid, false); assert.equal(nw.points.length, 3); assert.equal(mine.find(r => r.type === 'hazard').data.radius, 30);
+  const tips = await M.$$eval('.leaflet-tooltip', e => e.map(x => x.textContent)); assert.ok(tips.some(x => /狭い道 幅2m/.test(x)) && tips.includes('自宅')); ok('5種類の記録が、専用の保存先(マイマップ)に保存され、地図に表示される');
+  await M.click('.my.hy >> nth=0'); await M.waitForSelector('.pp button.edit'); await M.click('.pp button.edit'); await form(async () => { await M.fill('#ov input[type=text]', '公設 40t 水槽'); });
+  assert.ok((await items(M)).some(r => r.type === 'hydrant' && r.data.label === '公設 40t 水槽')); ok('記録をタップして編集できる');
+  await M.click('#btnInc'); await M.waitForSelector('#ov.on'); await M.fill('#ov input >> nth=0', 'マイマップ'); await M.click('#ov .btns .pri'); assert.ok(await M.isVisible('#ov.on')); await M.waitForFunction(() => /事案名には使えません/.test(document.querySelector('#toast').textContent)); ok('事案名に「マイマップ」は使えない');
+  await M.fill('#ov input >> nth=0', '別の出動'); await M.click('#ov .btns .pri'); await M.waitForFunction(() => !document.querySelector('#ov.on'));
+  await M.waitForFunction(() => document.querySelectorAll('.my').length === 4); ok('事案を切り替えても、マイマップの記録は消えず表示される');
+  await M.reload(); await M.waitForFunction(() => document.querySelectorAll('.my').length === 4); assert.ok(await M.isVisible('#toolset button.on[data-set=mymap]')); ok('再起動しても記録とツールの選択が残る');
+  await gm.close();
+
+  // ---- マイマップをもとに経路を選び直す ----
+  const gr = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['geolocation'], geolocation: { latitude: 35.6801, longitude: 139.7660 } });
+  await gr.addInitScript(() => localStorage.setItem('dm_vehicles_v1', JSON.stringify({ selected: 'ambulance', dims: { ambulance: { width: 2.3, height: 3, weight: 5, length: 6 }, fire: {}, large: {} } })));
+  await setup(gr);
+  const R = await gr.newPage(); await R.goto(INDEX); await R.click('#btnLocal'); await R.waitForFunction(() => Math.abs(map.getCenter().lat - 35.6801) < 0.001);
+  await R.evaluate(() => {
+    commitMy('narrow', { points: [[35.683, 139.7662], [35.683, 139.7686]], width: 2.0, label: '一方通行', avoid: false });        // 車両幅2.3m > 道幅2.0m → 自動で避ける
+    commitMy('narrow', { points: [[35.6840, 139.769], [35.6855, 139.769]], width: 5.0, label: 'ゆとりあり', avoid: false });     // 通れる → 注意のみ
+    commitMy('hazard', { pos: [35.6815, 139.7660], label: '落石', radius: 20, avoid: true });                                      // 避ける
+    commitMy('hazard', { pos: [35.70, 139.80], label: '遠い危険', radius: 20, avoid: true });                                      // 出発〜目標から遠い → 考慮しない
+    commitMy('hazard', { pos: [35.6845, 139.7690], label: '注意だけ', radius: 15, avoid: false });                                 // 注意のみ
+  });
+  mocks.valhalla.length = 0;
+  await R.click('[data-mode=goal]'); await tap(R, 0.6, 0.4); await R.waitForFunction(() => document.querySelector('#sheet .sum') && document.querySelector('.fd'));
+  const rq = JSON.parse(new URL(mocks.valhalla[0]).searchParams.get('json'));
+  assert.equal(rq.exclude_polygons.length, 2); for (const ring of rq.exclude_polygons) { assert.deepEqual(ring[0], ring.at(-1)); assert.ok(ring.every(p => p[0] > 100 && p[1] < 90)); }
+  ok('経路検索の回避エリア: 「避ける」危険個所と、車両幅で通れない狭い道だけが渡される(通れる道・遠い記録・注意のみは渡さない)');
+  const sheetTxt = await R.textContent('#sheet'); assert.match(sheetTxt, /2か所を避けて経路を選びました/); assert.match(sheetTxt, /危険個所\(落石\)/); assert.match(sheetTxt, /狭い道\(幅2m\)/); ok('どこを避けたかを経路シートに表示');
+  await R.click('#sheet .tabs button:has-text("注意箇所")');
+  const mineF = await R.$$eval('#sheet .find', b => b.map(x => x.textContent).filter(x => x.includes('【マイマップ】')));
+  assert.equal(mineF.length, 4, mineF.join(' / ')); assert.ok(mineF.some(x => /通行困難.*危険個所: 落石\(避ける設定\)/.test(x))); assert.ok(mineF.some(x => /通行困難.*幅2m.*車両幅2.3m/.test(x))); assert.ok(mineF.some(x => /要確認.*幅5m/.test(x))); assert.ok(mineF.some(x => /要確認.*注意だけ/.test(x)));
+  assert.ok(!mineF.some(x => x.includes('遠い危険'))); ok('経路沿いの記録が注意箇所に出る(避けきれない/通れない=赤、注意だけ=橙)');
+  // 避ける経路がない → 避けずに案内し、理由を表示
+  mocks.v442 = true; mocks.valhalla.length = 0; await R.click('#sheet .tabs button:has-text("経路案内")'); await R.click('#act-route');
+  await R.waitForFunction(() => /避ける経路が見つかりませんでした/.test(document.querySelector('#sheet').textContent));
+  assert.equal(mocks.valhalla.length, 2); assert.equal(JSON.parse(new URL(mocks.valhalla[1]).searchParams.get('json')).exclude_polygons, undefined); mocks.v442 = false; ok('避ける経路が見つからないときは、避けずに探し直し、その旨を警告表示');
+  // 目標付近の水利
+  await R.evaluate(() => { const g = getItem('goal').data.pos; commitMy('hydrant', { pos: [g[0] + 0.001, g[1]], label: '公設消火栓' }); commitMy('water', { pos: [g[0], g[1] + 0.002], label: '川' }); commitMy('hydrant', { pos: [g[0] + 0.05, g[1]], label: '遠い栓' }); });
+  await R.click('#act-check'); await R.waitForFunction(() => /目標付近の水利/.test(document.querySelector('#sheet').textContent));
+  const wt = await R.textContent('#sheet'); assert.ok(wt.includes('公設消火栓') && wt.includes('川') && !wt.includes('遠い栓')); ok('目標付近(500m以内)の消火栓・水利を近い順に一覧表示');
+  await R.screenshot({ path: SHOT + '/shot-mymap.png' });
+  await gr.close();
 
 
   // ================= Googleマップのように使う =================

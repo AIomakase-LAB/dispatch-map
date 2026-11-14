@@ -108,3 +108,15 @@
 .find.navgo { background:#1f9d55; color:#fff; font-weight:700; font-size:18px; justify-content:center; min-height:58px; }
 
 [hidden] { display:none !important; }   /* display を指定した要素でも hidden 属性で確実に隠す */
+
+/* マイマップ(普段の記録) */
+.my { width:34px; height:34px; border-radius:50%; border:3px solid #fff; color:#fff; font-weight:700; font-size:16px; line-height:28px; text-align:center; box-shadow:0 1px 4px #000; }
+.my.hy { background:#c1121f; } .my.wa { background:#1565c0; } .my.hz { background:#f2c200; color:#111; border-radius:7px; }
+.badge.hy { background:#c1121f; } .badge.wt { background:#1565c0; }
+#bar .toolset { display:grid; grid-template-columns:1fr 1fr; gap:4px; }
+#bar .toolset button { min-height:38px; background:#2a303b; font-weight:700; font-size:13px; }
+#bar .toolset button.on { background:#2b7de9; }
+.navigating .toolset { display:none !important; }
+.md label.chk { display:flex; align-items:center; gap:10px; font-size:16px; margin-top:16px; }
+.md input[type=checkbox] { width:26px; height:26px; }
+.pp button.edit { background:#2b7de9; margin-bottom:6px; }

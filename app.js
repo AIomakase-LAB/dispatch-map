@@ -18,7 +18,17 @@ const CONFIG = {
   // barrier の分類。RED=通れない可能性が高い / ORANGE=要確認(解錠・開放で通れる場合あり)
   BARRIER_RED: ['bollard', 'block', 'jersey_barrier'],
   BARRIER_ORANGE: ['gate', 'lift_gate', 'swing_gate', 'chain', 'height_restrictor', 'bump_gate', 'sliding_gate'],
-  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1', lastpos: 'dm_lastpos', voice: 'dm_voice' },
+  // マイマップ(普段の記録: 消火栓・水利・狭い道・危険個所・進入経路)。事案とは別に、いつでも表示される
+  MYMAP_INCIDENT: 'マイマップ',  // 保存先の事案名(予約名。事案名には使えない)
+  AVOID: {
+    hazardRadius: 20,          // 危険個所の既定の半径(m)
+    narrowHalfWidth: 10,       // 狭い道を経路検索で避けるとき、道の両側に取る幅(m)
+    maxPolygons: 25,           // 経路検索に渡す回避エリアの最大数(GETのURLが長くなりすぎないように)
+    corridorM: 1500,           // 出発・目標を結ぶ線からこの距離以内の記録だけを考慮する(m)
+    noticeLineM: 25,           // 経路がこの距離以内を通る狭い道を「注意」として表示する(m)
+  },
+  WATER_NEAR_M: 500,           // 目標地点のまわりで、消火栓・水利を一覧に出す距離(m)
+  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1', lastpos: 'dm_lastpos', voice: 'dm_voice', toolset: 'dm_toolset' },
 };
 
 /* =====================================================================
@@ -39,6 +49,9 @@ const DIM_KEYS = [
   { k: 'weight', label: '重量', unit: 't' },
   { k: 'length', label: '長さ', unit: 'm' },
 ];
+
+const MY = CONFIG.MYMAP_INCIDENT;
+const MY_TYPES = ['hydrant', 'water', 'narrow', 'hazard', 'approach'];
 
 /* ===== 小さなユーティリティ ===== */
 const $ = (s, r = document) => r.querySelector(s);
@@ -142,9 +155,11 @@ function persistRow(row) {
     if (!jset(CONFIG.LS.outbox, outbox)) throw new Error('localStorage に保存できません(容量不足/プライベートモード)');
   }
 }
+const cachedRows = () => { const c = jget(CONFIG.LS.cache, {}); return (c[state.incident] || []).concat(c[MY] || []); };
 function persistCache() {                        // 圏外で起動しても直前の内容が見えるように
   if (isLocal()) return;
-  const c = jget(CONFIG.LS.cache, {}); c[state.incident] = [...items.values()]; jset(CONFIG.LS.cache, c);
+  const c = jget(CONFIG.LS.cache, {}), all = [...items.values()];
+  c[state.incident] = all.filter(r => r.incident !== MY); c[MY] = all.filter(r => r.incident === MY); jset(CONFIG.LS.cache, c);
 }
 /** 送信キューを順に送る。圏外なら止めて次回に再送。入力エラーの1件は捨てて続ける。 */
 async function flush() {
@@ -221,7 +236,9 @@ map.on('click', e => { if (mode) handleTap([r6(e.latlng.lat), r6(e.latlng.lng)])
 let meLayer = null;
 
 /* ===== 図形の描画 ===== */
-const TYPE_NAME = { arrow: '進入方向', area: '通行不可エリア', line: '線', memo: 'メモ', start: '出発地点', goal: '目標地点' };
+const TYPE_NAME = { arrow: '進入方向', area: '通行不可エリア', line: '線', memo: 'メモ', start: '出発地点', goal: '目標地点',
+  hydrant: '消火栓', water: '水利', narrow: '狭い道', hazard: '危険個所', approach: '進入経路' };
+const narrowLabel = d => `狭い道${d.width != null ? ` 幅${d.width}m` : ''}${d.avoid ? ' ⛔避ける' : ''}${d.label ? ' / ' + d.label : ''}`;
 const arrowText = d => `${dirName(bearing(d.from, d.to))}向き進入` + (d.label ? ` / ${d.label}` : '');
 
 function buildLayer(row) {
@@ -248,6 +265,19 @@ function buildLayer(row) {
     g.bindTooltip(esc(d.text), { permanent: true, direction: 'right', offset: [12, -14], className: 'lbl' });
   } else if (t === 'start' || t === 'goal') {
     g = L.marker(d.pos, { zIndexOffset: 500, icon: L.divIcon({ className: '', iconSize: [40, 40], iconAnchor: [20, 20], html: `<div class="sg ${t === 'start' ? 's' : 'g'}">${t === 'start' ? '出' : '目'}</div>` }) });
+  } else if (t === 'hydrant' || t === 'water') {
+    g = L.marker(d.pos, { icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 17], html: `<div class="my ${t === 'hydrant' ? 'hy' : 'wa'}">${t === 'hydrant' ? '消' : '水'}</div>` }) });
+  } else if (t === 'narrow') {
+    g = L.featureGroup([L.polyline(d.points, { weight: 30, opacity: 0.01 }), L.polyline(d.points, { color: '#f77f00', weight: 8, opacity: 0.9 }), L.polyline(d.points, { color: '#111', weight: 2, dashArray: '2 8', interactive: false })]);
+    g.bindTooltip(esc(narrowLabel(d)), { permanent: true, direction: 'center', className: 'lbl' });
+  } else if (t === 'hazard') {
+    g = L.featureGroup([L.circle(d.pos, { radius: d.radius || CONFIG.AVOID.hazardRadius, color: '#f2c200', weight: 2, fillColor: '#f2c200', fillOpacity: 0.25, interactive: false }),
+      L.marker(d.pos, { icon: L.divIcon({ className: '', iconSize: [34, 34], iconAnchor: [17, 17], html: '<div class="my hz">⚠</div>' }) })]);
+  } else if (t === 'approach') {
+    const last = d.points[d.points.length - 1], b = bearing(d.points[d.points.length - 2], last);
+    g = L.featureGroup([L.polyline(d.points, { weight: 30, opacity: 0.01 }), L.polyline(d.points, { color: '#00897b', weight: 6 }),
+      L.marker(last, { icon: L.divIcon({ className: '', iconSize: [30, 30], iconAnchor: [15, 15], html: `<div class="ah" style="color:#00897b;transform:rotate(${b.toFixed(0)}deg)">▲</div>` }) })]);
+    g.bindTooltip(esc(d.label || '進入経路'), { permanent: true, direction: 'center', className: 'lbl' });
   } else return null;
   g.on('click', open);
   return g;
@@ -260,9 +290,13 @@ function openItemPopup(row, ll) {
   else if (row.type === 'area') detail = d.reason || '(理由なし)';
   else if (row.type === 'line') detail = d.label || '';
   else if (row.type === 'memo') detail = d.text;
+  else if (row.type === 'hydrant' || row.type === 'water' || row.type === 'approach') detail = d.label || '';
+  else if (row.type === 'narrow') detail = narrowLabel(d).replace(/^狭い道 ?/, '') || '(幅・メモなし)';
+  else if (row.type === 'hazard') detail = `${d.label || '(名称なし)'} / 半径${d.radius || CONFIG.AVOID.hazardRadius}m / ${d.avoid !== false ? '経路検索で避ける' : '注意表示のみ'}`;
   const el = h('div', { class: 'pp' },
     h('b', {}, TYPE_NAME[row.type]), h('div', {}, detail),
     h('div', { class: 'meta' }, `${row.author || '-'} / ${fmtTime(row.updatedAt)}`),
+    MY_TYPES.includes(row.type) ? h('button', { class: 'edit', onclick: () => { map.closePopup(); editItem(row); } }, '✎ 編集') : null,
     h('button', { onclick: () => { map.closePopup(); deleteItem(row); } }, '🗑 削除'));
   L.popup({ minWidth: 200 }).setLatLng(ll).setContent(el).openOn(map);
 }
@@ -298,6 +332,8 @@ function write(row) {
 }
 const commit = (type, data, id) =>
   write({ id: id || newId(), incident: state.incident, type, data, author: state.author, updatedAt: new Date().toISOString(), deleted: false });
+const commitMy = (type, data, id) =>
+  write({ id: id || newId(), incident: MY, type, data, author: state.author, updatedAt: new Date().toISOString(), deleted: false });
 const deleteItem = row => write({ ...row, deleted: true, author: state.author, updatedAt: new Date().toISOString() });
 const getItem = type => items.get(type + ':' + state.incident);
 
@@ -309,7 +345,13 @@ const HINTS = {
   memo: 'メモを置く場所をタップ',
   start: '出発地点をタップ(または「現在地」ボタン)',
   goal: '目標地点をタップ',
+  hydrant: '消火栓の位置をタップ(続けて記録できます。終わったら「中止」)',
+  water: '取水できる場所(川・ため池など)をタップ(続けて記録できます)',
+  narrow: '狭い道を点でなぞり、2点以上タップして【確定】',
+  hazard: '危険個所をタップ',
+  approach: '進入経路を点でなぞり、2点以上タップして【確定】',
 };
+const LINE_MODES = ['area', 'line', 'narrow', 'approach'];
 function setMode(m) {
   if (mode === m) m = null;
   clearPreview(); pending = []; mode = m;
@@ -323,8 +365,8 @@ function renderPending() {
   box.classList.toggle('on', !!mode);
   box.replaceChildren(h('div', { class: 'hint', id: 'hint' }, mode ? `${HINTS[mode]}${pending.length ? `(${pending.length}点)` : ''}` : ''));
   if (!mode) return;
-  if (mode === 'area' || mode === 'line') box.append(h('button', { class: 'ok', id: 'btnOk', onclick: finishShape }, '確定'));
-  if (mode === 'area' || mode === 'line' || mode === 'arrow') box.append(h('button', { id: 'btnUndo', onclick: () => { pending.pop(); drawPreview(); renderPending(); } }, '戻す'));
+  if (LINE_MODES.includes(mode)) box.append(h('button', { class: 'ok', id: 'btnOk', onclick: finishShape }, '確定'));
+  if (LINE_MODES.includes(mode) || mode === 'arrow') box.append(h('button', { id: 'btnUndo', onclick: () => { pending.pop(); drawPreview(); renderPending(); } }, '戻す'));
   box.append(h('button', { id: 'btnCancel', onclick: () => setMode(null) }, '中止'));
 }
 function clearPreview() { if (previewLayer) { map.removeLayer(previewLayer); previewLayer = null; } }
@@ -350,6 +392,12 @@ async function handleTap(ll) {
     if (text) commit('memo', { pos: ll, text });
     return;
   }
+  if (mode === 'hydrant' || mode === 'water' || mode === 'hazard') {
+    const m = mode; if (m === 'hazard') setMode(null);          // 消火栓・水利は続けて記録できる
+    const r = await askForm(myForm(m, {}));
+    if (r) commitMy(m, m === 'hazard' ? { pos: ll, ...r, radius: r.radius || CONFIG.AVOID.hazardRadius } : { pos: ll, ...r });
+    return;
+  }
   pending.push(ll); drawPreview(); renderPending();
   if (mode === 'arrow' && pending.length === 2) {
     const [from, to] = pending; setMode(null);
@@ -366,6 +414,9 @@ async function finishShape() {
   if (m === 'area') {
     const reason = await askText({ title: '通行不可の理由', chips: ['冠水', '工事', '倒木', '通行止め', '崩落'] });
     if (reason !== null) commit('area', { points: pts, reason });
+  } else if (m === 'narrow' || m === 'approach') {
+    const r = await askForm(myForm(m, {}));
+    if (r) commitMy(m, { points: pts, ...r });
   } else {
     const label = await askText({ title: '線のラベル(任意)' });
     if (label !== null) commit('line', { points: pts, label });
@@ -382,6 +433,53 @@ function modal(title, body, buttons) {
     ov.classList.add('on');
   });
 }
+/** 入力フォーム。fields: [{key, label, type:'text'|'number'|'check', value, chips}]。決定で {key: 値}、キャンセルで null */
+function askForm({ title, note, fields }) {
+  const els = {};
+  const body = h('div', {}, note ? h('div', { class: 'note' }, note) : null, fields.map(f => {
+    if (f.type === 'check') {
+      els[f.key] = h('input', { type: 'checkbox' }); els[f.key].checked = !!f.value;
+      return h('label', { class: 'chk' }, els[f.key], f.label);
+    }
+    els[f.key] = f.type === 'number' ? h('input', { type: 'number', inputmode: 'decimal', step: '0.1', min: '0' }) : h('input', { type: 'text', maxlength: 80, autocomplete: 'off' });
+    els[f.key].value = f.value ?? '';
+    return h('div', {}, h('label', {}, f.label), els[f.key],
+      f.chips ? h('div', { class: 'chips' }, f.chips.map(c => h('button', { onclick: () => { els[f.key].value = c; } }, c))) : null);
+  }));
+  return modal(title, body, [
+    { label: 'キャンセル', value: null },
+    { label: '決定', pri: true, onclick: done => {
+      const out = {};
+      for (const f of fields) {
+        const el = els[f.key];
+        if (f.type === 'check') out[f.key] = el.checked;
+        else if (f.type === 'number') { const v = el.value === '' ? null : Number(el.value); if (v !== null && !(v > 0)) { toast(`${f.label}は0より大きい数字で入力してください`, true); return; } out[f.key] = v; }
+        else out[f.key] = el.value.trim();
+      }
+      done(out);
+    } },
+  ]);
+}
+/** マイマップの種類ごとの入力項目 */
+function myForm(type, d) {
+  const f = {
+    hydrant: { title: '消火栓', fields: [{ key: 'label', label: '名称・種類(任意)', value: d.label || '', chips: ['地上式', '地下式', '防火水槽', '私設消火栓'] }] },
+    water: { title: '水利(取水できる場所)', fields: [{ key: 'label', label: '場所・種類(任意)', value: d.label || '', chips: ['河川', '用水路', 'ため池', 'プール', '海'] }] },
+    narrow: { title: '狭い道', note: '道幅が分かれば入れてください。車両の幅より狭いときは、経路検索で自動的に避けます。',
+      fields: [{ key: 'width', label: '道幅(m)', type: 'number', value: d.width ?? '' },
+        { key: 'label', label: 'メモ(任意)', value: d.label || '', chips: ['一方通行', '電柱あり', '路上駐車が多い', 'すれ違い不可'] },
+        { key: 'avoid', type: 'check', label: '必ず避ける(経路検索で通らない)', value: !!d.avoid }] },
+    hazard: { title: '危険個所', fields: [{ key: 'label', label: 'どんな危険か', value: d.label || '', chips: ['落石', '冠水しやすい', '低い架線', '踏切', '急カーブ', '段差', '工事中', '行き止まり'] },
+      { key: 'radius', label: '範囲の半径(m)', type: 'number', value: d.radius ?? CONFIG.AVOID.hazardRadius },
+      { key: 'avoid', type: 'check', label: '経路検索で避ける', value: d.avoid !== false }] },
+    approach: { title: '進入経路', fields: [{ key: 'label', label: '名前(例: 自宅)', value: d.label || '', chips: ['自宅', '進入経路'] }] },
+  };
+  return f[type];
+}
+async function editItem(row) {
+  const r = await askForm(myForm(row.type, row.data));
+  if (r) write({ ...row, data: { ...row.data, ...r }, author: state.author, updatedAt: new Date().toISOString() });
+}
 function askText({ title, value = '', chips = [], required = false }) {
   const inp = h('input', { type: 'text', value, maxlength: 80, autocomplete: 'off' });
   const body = h('div', {}, inp, chips.length ? h('div', { class: 'chips' }, chips.map(c => h('button', { onclick: () => { inp.value = c; } }, c))) : null);
@@ -396,7 +494,7 @@ function askText({ title, value = '', chips = [], required = false }) {
 async function recentIncidents() {
   try {
     if (isLocal()) {
-      const m = {}; jget(CONFIG.LS.local, []).forEach(r => { if (!r.deleted && r.type) m[r.incident] = Math.max(m[r.incident] || 0, +new Date(r.updatedAt)); });
+      const m = {}; jget(CONFIG.LS.local, []).forEach(r => { if (!r.deleted && r.type && r.incident !== MY) m[r.incident] = Math.max(m[r.incident] || 0, +new Date(r.updatedAt)); });
       return Object.keys(m).sort((a, b) => m[b] - m[a]).slice(0, 8);
     }
     return (await api('getIncidents')).incidents.map(i => i.name).slice(0, 8);
@@ -418,7 +516,11 @@ async function openSettings(first) {
       }),
       act(isLocal() ? '接続コードで接続する' : '接続コードを入れ直す', () => { done(false); showSetup(); }))),
     (first ? [] : [{ label: '閉じる', value: null }]).concat([{ label: '保存', pri: true, onclick: d => validate(d) }]));
-  function validate(d) { if (!inc.value.trim() || !au.value.trim()) { toast('事案名と隊名を入力してください'); return; } d(true); }
+  function validate(d) {
+    if (!inc.value.trim() || !au.value.trim()) { toast('事案名と隊名を入力してください'); return; }
+    if (inc.value.trim() === MY) { toast(`「${MY}」は普段の記録用の名前なので、事案名には使えません`, true); return; }
+    d(true);
+  }
   if (!result) return;
   const changed = inc.value.trim() !== state.incident;
   state.incident = inc.value.trim(); state.author = au.value.trim();
@@ -428,6 +530,7 @@ async function openSettings(first) {
 }
 async function deleteIncidentData(name) {
   if (!name) return;
+  if (name === MY) { toast('マイマップは一括削除できません(記録を1件ずつ削除してください)', true); return; }
   try {
     if (isLocal()) {
       const now = new Date().toISOString();
@@ -443,7 +546,7 @@ async function deleteIncidentData(name) {
 function switchIncident() {
   for (const s of shown.values()) map.removeLayer(s.layer);
   shown.clear(); items.clear(); clearRoute(); clearFindings(); setMode(null); writeEpoch++;
-  if (!isLocal()) applyRows(jget(CONFIG.LS.cache, {})[state.incident] || []);
+  if (!isLocal()) applyRows(cachedRows());
   poll();
 }
 
@@ -487,11 +590,11 @@ async function poll() {
   const ep = writeEpoch, inc = state.incident;
   try {
     let rows;
-    if (isLocal()) rows = jget(CONFIG.LS.local, []).filter(r => r.incident === inc && !r.deleted);
+    if (isLocal()) rows = jget(CONFIG.LS.local, []).filter(r => (r.incident === inc || r.incident === MY) && !r.deleted);
     else {
       await flush();
       if (outbox.length) return;                 // 未送信があるうちはサーバーの内容で上書きしない
-      rows = (await api('getItems', { incident: inc })).items;
+      rows = (await api('getItems', { incident: inc, incidents: [inc, MY] })).items;      // 事案 + マイマップ
     }
     if (ep === writeEpoch && inc === state.incident && !outbox.length) {
       applyRows(rows); persistCache();
@@ -503,6 +606,101 @@ async function poll() {
     if (!isLocal()) setSync('off');
     setError('同期', e.auth ? '接続コードが無効です。設定から入れ直してください' : `共有データを取得できません(次回再試行): ${e.message}`);
   } finally { polling = false; updateInfo(); }
+}
+
+/* =====================================================================
+ * マイマップ(普段の記録)を、経路検索と注意表示に使う
+ *  - 「避ける」設定の危険個所、車両の幅では通れない(または「必ず避ける」の)狭い道 → 経路検索で回避エリアにして経路を選び直す
+ *  - 避ける経路がなければ、避けずに案内し、その旨を表示する
+ *  - 経路沿い(または目標周辺)にある記録を、注意箇所として一覧・地図・案内中の音声で知らせる
+ *  - 目標付近の消火栓・水利を一覧に出す
+ * ===================================================================== */
+const myItems = () => [...items.values()].filter(r => r.incident === MY);
+function localXY(ref) {
+  const k = Math.cos(ref[0] * Math.PI / 180), M = 111320;
+  return { to: p => [(p[1] - ref[1]) * k * M, (p[0] - ref[0]) * M], from: (x, y) => [ref[0] + y / M, ref[1] + x / (k * M)] };
+}
+/** 点 p と線分 a-b の距離(m)と、線分上の最寄り点 */
+function segDist(p, a, b) {
+  const L = localXY(p), [ax, ay] = L.to(a), [bx, by] = L.to(b), dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / len2)) : 0, cx = ax + t * dx, cy = ay + t * dy;
+  return { d: Math.hypot(cx, cy), ll: L.from(cx, cy) };
+}
+function distToLine(p, pts) {
+  let best = { d: Infinity, ll: pts[0] };
+  for (let i = 0; i + 1 < pts.length; i++) { const q = segDist(p, pts[i], pts[i + 1]); if (q.d < best.d) best = q; }
+  return best;
+}
+/** Valhalla の exclude_polygons 用([lon,lat] の閉じた環) */
+function hazardPoly(pos, r) {
+  const L = localXY(pos), ring = [];
+  for (let i = 0; i < 8; i++) { const t = i * Math.PI / 4, q = L.from(r * Math.cos(t), r * Math.sin(t)); ring.push([+q[1].toFixed(5), +q[0].toFixed(5)]); }
+  ring.push(ring[0]); return ring;
+}
+function lineBufferPoly(points, half) {
+  let pts = points;
+  if (pts.length > 12) pts = Array.from({ length: 12 }, (_, i) => points[Math.round(i * (points.length - 1) / 11)]);
+  const L = localXY(pts[0]), xy = pts.map(L.to), unit = (u, v) => { const n = Math.hypot(u, v) || 1; return [u / n, v / n]; };
+  const left = [], right = [];
+  xy.forEach((q, i) => {
+    const d1 = i > 0 ? unit(q[0] - xy[i - 1][0], q[1] - xy[i - 1][1]) : null, d2 = i + 1 < xy.length ? unit(xy[i + 1][0] - q[0], xy[i + 1][1] - q[1]) : null;
+    const d = d1 && d2 ? unit(d1[0] + d2[0], d1[1] + d2[1]) : (d1 || d2), n = [-d[1], d[0]];
+    left.push([q[0] + n[0] * half, q[1] + n[1] * half]); right.push([q[0] - n[0] * half, q[1] - n[1] * half]);
+  });
+  const ring = left.concat(right.reverse()).map(q => { const w = L.from(q[0], q[1]); return [+w[1].toFixed(5), +w[0].toFixed(5)]; });
+  ring.push(ring[0]); return ring;
+}
+/** 狭い道を「避ける」か: 「必ず避ける」設定、または車両の幅(+余裕)が道幅以上 */
+const narrowAvoid = (d, veh) => d.avoid === true || (d.width != null && veh.width != null && veh.width + CONFIG.MARGIN.width >= d.width);
+const myBrief = r => r.type === 'hazard' ? `危険個所(${r.data.label || '名称なし'})` : `狭い道${r.data.width != null ? `(幅${r.data.width}m)` : ''}${r.data.label ? ' ' + r.data.label : ''}`;
+/** 経路検索に渡す回避エリア。出発〜目標を結ぶ線に近い順に、最大数まで。 */
+function buildAvoid(startPos, goalPos, veh) {
+  const A = CONFIG.AVOID, lim = Math.max(A.corridorM, haversine(startPos, goalPos) * 0.5), cand = [];
+  for (const r of myItems()) {
+    const d = r.data; let poly, off;
+    if (r.type === 'hazard' && d.avoid !== false) { poly = hazardPoly(d.pos, Math.max(d.radius || A.hazardRadius, 10)); off = segDist(d.pos, startPos, goalPos).d; }
+    else if (r.type === 'narrow' && narrowAvoid(d, veh)) { poly = lineBufferPoly(d.points, A.narrowHalfWidth); off = Math.min(...d.points.map(q => segDist(q, startPos, goalPos).d)); }
+    else continue;
+    if (off <= lim) cand.push({ row: r, poly, off });
+  }
+  cand.sort((x, y) => x.off - y.off);
+  const use = cand.slice(0, A.maxPolygons);
+  return { polys: use.map(c => c.poly), items: use.map(c => c.row), capped: cand.length > A.maxPolygons };
+}
+/** 経路を一定間隔(既定10m)の点に分ける。頂点の間隔が長い直線道路でも、途中にある記録を見逃さないため。 */
+function densify(shape, step = 10, maxPts = 3000) {
+  let total = 0; for (let i = 1; i < shape.length; i++) total += haversine(shape[i - 1], shape[i]);
+  const st = Math.max(step, total / maxPts), out = [shape[0]];
+  for (let i = 1; i < shape.length; i++) {
+    const p = shape[i - 1], q = shape[i], d = haversine(p, q), n = Math.floor(d / st);
+    for (let k = 1; k <= n; k++) { const t = k * st / d; out.push([p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t]); }
+    out.push(q);
+  }
+  return out;
+}
+/** 経路沿い(kind='route')または目標周辺(kind='around')にあるマイマップの危険個所・狭い道 → 注意箇所 */
+function mymapNotices(kind, veh, origin) {
+  const out = [], T = CONFIG.AVOID, sv = kind === 'route' && route ? (route.dense || (route.dense = densify(route.shape))) : null;
+  for (const r of myItems()) {
+    const d = r.data; let hit = null, sev = 'orange', why = '';
+    if (r.type === 'hazard') {
+      if (sv) { let b = { d: Infinity }; for (const v of sv) { const dd = haversine(v, d.pos); if (dd < b.d) b = { d: dd, ll: v }; } if (b.d <= (d.radius || T.hazardRadius) + 20) hit = b.ll; }
+      else if (!sv && kind === 'around' && haversine(origin, d.pos) <= CONFIG.CHECK_RADIUS_M) hit = d.pos;
+      if (hit) { sev = sv && d.avoid !== false ? 'red' : 'orange'; why = `【マイマップ】危険個所: ${d.label || '(名称なし)'}${d.avoid !== false ? '(避ける設定)' : ''}`; }
+    } else if (r.type === 'narrow') {
+      if (sv) { let b = { d: Infinity }; for (const v of sv) { const q = distToLine(v, d.points); if (q.d < b.d) b = { d: q.d, ll: v }; } if (b.d <= T.noticeLineM) hit = b.ll; }
+      else if (kind === 'around') { const q = distToLine(origin, d.points); if (q.d <= CONFIG.CHECK_RADIUS_M) hit = q.ll; }
+      if (hit) { sev = narrowAvoid(d, veh) ? 'red' : 'orange'; why = `【マイマップ】狭い道${d.width != null ? ` 幅${d.width}m` : '(幅の記録なし)'}${d.label ? ' ' + d.label : ''}${d.width != null && veh.width != null ? `(車両幅${veh.width}m)` : ''}`; }
+    }
+    if (hit) out.push({ id: `my:${r.id}`, ll: hit, name: '', sev, reasons: [why], dist: haversine(origin, hit) });
+  }
+  return out;
+}
+/** 目標付近の消火栓・水利(近い順) */
+function waterNear() {
+  const g = getItem('goal'); if (!g) return [];
+  return myItems().filter(r => r.type === 'hydrant' || r.type === 'water')
+    .map(r => ({ r, dist: haversine(g.data.pos, r.data.pos) })).filter(x => x.dist <= CONFIG.WATER_NEAR_M).sort((x, y) => x.dist - y.dist).slice(0, 8);
 }
 
 /* ===== 現在地 ===== */
@@ -609,8 +807,7 @@ function analyze(elements, veh, origin) {
   }
   return out.sort((a, b) => SEV_RANK[b.sev] - SEV_RANK[a.sev] || a.dist - b.dist);
 }
-function sampleCoords(shape) {
-  const n = CONFIG.ROUTE_MAX_POINTS;
+function sampleCoords(shape, n = CONFIG.ROUTE_MAX_POINTS) {
   if (shape.length <= n) return shape;
   const out = []; for (let i = 0; i < n; i++) out.push(shape[Math.round(i * (shape.length - 1) / (n - 1))]);
   return out;
@@ -636,13 +833,15 @@ async function runCheck(kind, keepTab) {
     origin = g.data.pos; area = `(around:${CONFIG.CHECK_RADIUS_M},${origin[0]},${origin[1]})`;
   }
   toast(kind === 'route' ? '経路沿いの注意箇所を検索中…' : '目標周辺の注意箇所を検索中…', 20000);
-  try {
-    const json = await overpass(buildQuery(area));
-    findings = analyze(json.elements, veh, origin);
-    checkInfo = { kind, veh, missing: missingDims(veh), at: new Date() };
-    drawFindings(); clearError('Overpass'); if (nav || keepTab === 'quiet') { /* 案内中・自動の再検索では画面を覆わない */ } else if (keepTab && sheetTab) renderSheet(); else showSheet('check');
-    if (!nav) toast(`注意箇所 ${findings.length}件(赤${findings.filter(f => f.sev === 'red').length}/橙${findings.filter(f => f.sev === 'orange').length})`);
-  } catch (e) { setError('Overpass', `注意箇所を取得できません: ${e.message}`); toast('注意箇所の取得に失敗しました'); }
+  const mine = mymapNotices(kind, veh, origin);          // マイマップ(通信なしで判定できる)
+  let osm = [], osmErr = null;
+  try { osm = analyze((await overpass(buildQuery(area))).elements, veh, origin); clearError('Overpass'); }
+  catch (e) { osmErr = e; setError('Overpass', `注意箇所を取得できません: ${e.message}(マイマップの記録だけを表示しています)`); }
+  findings = osm.concat(mine).sort((x, y) => SEV_RANK[y.sev] - SEV_RANK[x.sev] || x.dist - y.dist);
+  checkInfo = { kind, veh, missing: missingDims(veh), at: new Date() };
+  drawFindings();
+  if (nav || keepTab === 'quiet') { /* 案内中・自動の再検索では画面を覆わない */ } else if (keepTab && sheetTab) renderSheet(); else showSheet('check');
+  if (!nav) toast(osmErr && !mine.length ? '注意箇所の取得に失敗しました' : `注意箇所 ${findings.length}件(赤${findings.filter(f => f.sev === 'red').length}/橙${findings.filter(f => f.sev === 'orange').length})`);
 }
 function drawFindings() {
   if (findLayer) map.removeLayer(findLayer);
@@ -672,7 +871,7 @@ function decodePolyline6(str) {
   }
   return out;
 }
-function buildRouteRequest(startPos) {
+function buildRouteRequest(startPos, extraPolys = []) {
   const g = getItem('goal'), veh = getVehicle();
   const truck = {}; for (const d of DIM_KEYS) if (veh[d.k] != null) truck[d.k] = veh[d.k];   // m / t
   const req = {
@@ -681,7 +880,8 @@ function buildRouteRequest(startPos) {
   };
   const polys = [...items.values()].filter(r => r.type === 'area' && r.data.points.length >= 3)
     .map(r => { const ring = r.data.points.map(p => [+p[1].toFixed(5), +p[0].toFixed(5)]); ring.push(ring[0]); return ring; });   // [lon,lat]
-  if (polys.length) req.exclude_polygons = polys;
+  const all = polys.concat(extraPolys);                      // 描いた通行不可エリア + マイマップの回避エリア
+  if (all.length) req.exclude_polygons = all;
   return req;
 }
 /**
@@ -697,12 +897,21 @@ async function runRoute(opts = {}) {
     startPos = await locate({ silent: true, center: false });
     if (!startPos) { toast('現在地を取得できません。出発地点を地図タップで指定してください'); setMode('start'); return false; }
   }
-  const req = buildRouteRequest(startPos);
+  const veh = getVehicle(), goalPos = getItem('goal').data.pos, av = buildAvoid(startPos, goalPos, veh);
+  let polys = av.polys.slice(), avItems = av.items.slice(), avoidFailed = false, avoidCapped = av.capped;
+  const urlFor = extra => { const r = buildRouteRequest(startPos, extra); return { req: r, url: `${CONFIG.VALHALLA_ROUTE_URL}?json=${encodeURIComponent(JSON.stringify(r))}` }; };
   if (!opts.auto) toast('経路検索中…', 30000);
   try {
-    const url = `${CONFIG.VALHALLA_ROUTE_URL}?json=${encodeURIComponent(JSON.stringify(req))}`;
-    if (url.length > 7000) throw new Error('リクエストURLが長すぎます(通行不可エリアが多すぎる可能性)。エリアを減らしてください');
-    const j = await fetchJSON(url);
+    let q = urlFor(polys);
+    while (q.url.length > 7000 && polys.length) { polys.pop(); avItems.pop(); avoidCapped = true; q = urlFor(polys); }     // URLが長すぎるときは回避エリアを減らす
+    if (q.url.length > 7000) throw new Error('リクエストURLが長すぎます(通行不可エリアが多すぎる可能性)。エリアを減らしてください');
+    let j;
+    try { j = await fetchJSON(q.url); }
+    catch (e) {                                           // 避ける経路がないときは、避けずに探し直す
+      if (!polys.length || !/442|no path/i.test(e.message)) throw e;
+      polys = []; avItems = []; avoidFailed = true; q = urlFor([]); j = await fetchJSON(q.url);
+    }
+    const req = q.req;
     const trip = j.trip, leg = trip && trip.legs && trip.legs[0];
     if (!leg) throw new Error('経路が見つかりませんでした');
     clearRoute(true);
@@ -715,7 +924,7 @@ async function runRoute(opts = {}) {
       acc += (m.length || 0) * 1000; return s;
     });
     route = { shape, cum, total: cum[cum.length - 1], distKm: trip.summary.length, sec: trip.summary.time, steps,
-      excluded: (req.exclude_polygons || []).length, veh: getVehicle(), fromCurrent: !st && !opts.startPos };
+      excluded: (req.exclude_polygons || []).length - polys.length, avoided: avItems, avoidFailed, avoidCapped, veh: getVehicle(), fromCurrent: !st && !opts.startPos };
     routeLayer = L.polyline(route.shape, { color: '#1b5e20', weight: 7, opacity: 0.85, interactive: false }).addTo(map);
     clearError('Valhalla');
     if (!opts.auto) { map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] }); showSheet('route'); }
@@ -742,12 +951,21 @@ function renderSheet() {
       if (!findings.length) body.append(h('div', { class: 'note' }, 'OSMに登録された該当規制は見つかりませんでした。※未登録の規制・障害物はあり得ます。現場の状況を優先してください。'));
       for (const f of findings) body.append(h('button', { class: 'find', onclick: () => { map.flyTo(f.ll, 18); setTimeout(() => f.marker && f.marker.openPopup(), 700); } },
         h('span', { class: `badge ${f.sev}` }, f.sev === 'red' ? '通行困難' : '要確認'),
-        h('span', {}, h('b', {}, f.name || `OSM ${f.id}`), ...f.reasons.map(r => h('div', {}, r)), h('div', { class: 'note' }, `${fmtDist(f.dist)}`))));
+        h('span', {}, h('b', {}, f.name || (f.id.startsWith('my:') ? 'マイマップ' : `OSM ${f.id}`)), ...f.reasons.map(r => h('div', {}, r)), h('div', { class: 'note' }, `${fmtDist(f.dist)}`))));
+    }
+    const near = waterNear();
+    if (near.length) {
+      body.append(h('div', { class: 'note' }, `目標付近の水利(マイマップ・${CONFIG.WATER_NEAR_M}m以内)`));
+      for (const { r, dist } of near) body.append(h('button', { class: 'find', onclick: () => map.flyTo(r.data.pos, 18) },
+        h('span', { class: `badge ${r.type === 'hydrant' ? 'hy' : 'wt'}` }, TYPE_NAME[r.type]), h('span', {}, h('b', {}, r.data.label || TYPE_NAME[r.type]), h('div', { class: 'note' }, fmtDist(dist)))));
     }
   } else if (!route) body.append(h('div', { class: 'note' }, '出発・目標地点を設定して「経路」を押してください。'));
   else {
     body.append(h('div', { class: 'sum' }, `${route.distKm.toFixed(1)} km / 約${Math.max(1, Math.round(route.sec / 60))}分`),
       h('div', { class: 'note' }, `出発: ${route.fromCurrent ? '現在地' : '設定した出発地点'} / 車両: ${route.veh.name}${missingDims(route.veh).length ? `(${missingDims(route.veh).join('・')}未入力: 経路計算に未反映)` : ''} / 回避した通行不可エリア: ${route.excluded}件`),
+      route.avoided.length ? h('div', { class: 'note' }, `🛡 マイマップの記録をもとに ${route.avoided.length}か所を避けて経路を選びました: ${route.avoided.slice(0, 3).map(myBrief).join('、')}${route.avoided.length > 3 ? ` ほか${route.avoided.length - 3}か所` : ''}`) : null,
+      route.avoidFailed ? h('div', { class: 'note bad' }, '⚠ 記録した「避ける」箇所を避ける経路が見つかりませんでした。避けずに案内しています。「注意箇所」を確認してください。') : null,
+      route.avoidCapped ? h('div', { class: 'note' }, '(避ける記録が多いため、出発〜目標に近いものから一部だけ考慮しました)') : null,
       h('ol', { class: 'steps' }, route.steps.map(s => h('li', {}, `${s.text}`, s.km ? ` (${fmtDist(s.km * 1000)})` : ''))),
       h('button', { class: 'find', onclick: () => { clearRoute(); renderSheet(); } }, '経路を消す'));
   }
@@ -760,10 +978,21 @@ function renderSheet() {
 }
 
 /* ===== 画面下部ツールバー ===== */
-const DRAW_BTNS = [['arrow', '➤', '進入'], ['area', '⛔', '通行不可'], ['line', '〰', '線'], ['memo', '📌', 'メモ'], ['start', '🟢', '出発'], ['goal', '🎯', '目標']];
+const TOOLSETS = {
+  event: [['arrow', '➤', '進入'], ['area', '⛔', '通行不可'], ['line', '〰', '線'], ['memo', '📌', 'メモ'], ['start', '🟢', '出発'], ['goal', '🎯', '目標']],
+  mymap: [['hydrant', '🧯', '消火栓'], ['water', '💧', '水利'], ['narrow', '↔', '狭い道'], ['hazard', '⚠', '危険個所'], ['approach', '🏠', '進入経路']],
+};
+let toolset = lsGet(CONFIG.LS.toolset) === 'mymap' ? 'mymap' : 'event';
+function renderTools() {
+  const row = $('#rowDraw');
+  row.replaceChildren(...TOOLSETS[toolset].map(([m, ic, tx]) => h('button', { class: 'tb', 'data-mode': m, onclick: () => setMode(m) }, h('span', { class: 'ic' }, ic), tx)));
+  row.style.gridTemplateColumns = `repeat(${TOOLSETS[toolset].length}, 1fr)`;
+  $('#toolset').replaceChildren(...[['event', '事案の書き込み'], ['mymap', 'マイマップ(普段の記録)']].map(([k, t]) =>
+    h('button', { class: toolset === k ? 'on' : '', 'data-set': k, onclick: () => { toolset = k; lsSet(CONFIG.LS.toolset, k); setMode(null); renderTools(); } }, t)));
+}
 const ACT_BTNS = [['locate', '📍', '現在地', () => locate()], ['route', '🛣', '経路', runRoute], ['check', '⚠', '注意', () => runCheck(route ? 'route' : 'around')],
   ['veh', '🚒', '車両', openVehicle], ['list', '📋', '一覧', () => showSheet(sheetTab || (route ? 'route' : 'check'))], ['set', '⚙', '設定', () => openSettings(false)]];
-$('#rowDraw').append(...DRAW_BTNS.map(([m, ic, tx]) => h('button', { class: 'tb', 'data-mode': m, onclick: () => setMode(m) }, h('span', { class: 'ic' }, ic), tx)));
+renderTools();
 $('#rowAct').append(...ACT_BTNS.map(([id, ic, tx, fn]) => h('button', { class: 'tb', id: 'act-' + id, onclick: fn }, h('span', { class: 'ic' }, ic), tx)));
 $('#btnInc').onclick = () => openSettings(false);
 $('#btnVeh').onclick = openVehicle;
@@ -965,7 +1194,7 @@ function switchIncidentClean() {
 let timerStarted = false;
 async function start() {
   $('#setup').hidden = true;
-  if (!isLocal()) applyRows(jget(CONFIG.LS.cache, {})[state.incident] || []);
+  if (!isLocal()) applyRows(cachedRows());
   updateInfo();
   if (!timerStarted) {
     timerStarted = true;
