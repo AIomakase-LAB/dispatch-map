@@ -18,7 +18,7 @@ const CONFIG = {
   // barrier の分類。RED=通れない可能性が高い / ORANGE=要確認(解錠・開放で通れる場合あり)
   BARRIER_RED: ['bollard', 'block', 'jersey_barrier'],
   BARRIER_ORANGE: ['gate', 'lift_gate', 'swing_gate', 'chain', 'height_restrictor', 'bump_gate', 'sliding_gate'],
-  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1', lastpos: 'dm_lastpos' },
+  LS: { conn: 'dm_conn', local: 'dm_local_items', cache: 'dm_cache_v1', outbox: 'dm_outbox_v1', author: 'dm_author', incident: 'dm_incident', vehicles: 'dm_vehicles_v1', lastpos: 'dm_lastpos', voice: 'dm_voice' },
 };
 
 /* =====================================================================
@@ -179,6 +179,7 @@ let vehicles = loadVehicles();
 const items = new Map();     // id → row
 const shown = new Map();     // id → {sig, layer}
 let writeEpoch = 0, polling = false, mode = null, pending = [], previewLayer = null;
+let nav = null;                 // ナビ(経路案内)の状態。案内中でなければ null
 let route = null, routeLayer = null, findings = [], findLayer = null, checkInfo = null, sheetTab = null;
 
 function loadVehicles() {
@@ -639,8 +640,8 @@ async function runCheck(kind, keepTab) {
     const json = await overpass(buildQuery(area));
     findings = analyze(json.elements, veh, origin);
     checkInfo = { kind, veh, missing: missingDims(veh), at: new Date() };
-    drawFindings(); clearError('Overpass'); if (keepTab && sheetTab) renderSheet(); else showSheet('check');
-    toast(`注意箇所 ${findings.length}件(赤${findings.filter(f => f.sev === 'red').length}/橙${findings.filter(f => f.sev === 'orange').length})`);
+    drawFindings(); clearError('Overpass'); if (nav || keepTab === 'quiet') { /* 案内中・自動の再検索では画面を覆わない */ } else if (keepTab && sheetTab) renderSheet(); else showSheet('check');
+    if (!nav) toast(`注意箇所 ${findings.length}件(赤${findings.filter(f => f.sev === 'red').length}/橙${findings.filter(f => f.sev === 'orange').length})`);
   } catch (e) { setError('Overpass', `注意箇所を取得できません: ${e.message}`); toast('注意箇所の取得に失敗しました'); }
 }
 function drawFindings() {
@@ -683,41 +684,53 @@ function buildRouteRequest(startPos) {
   if (polys.length) req.exclude_polygons = polys;
   return req;
 }
-/** 経路検索。出発は、設定した出発地点があればそこから、なければ現在地から。成功したら true。 */
-async function runRoute() {
+/**
+ * 経路検索。出発は、設定した出発地点があればそこから、なければ現在地から。成功したら true。
+ * opts.startPos: 出発位置を指定(ナビ中のルート再検索)。opts.auto: 画面を動かさず静かに実行する。
+ */
+async function runRoute(opts = {}) {
   if (!getItem('goal')) { toast('目標地点を地図でタップしてください'); setMode('goal'); return false; }
   const st = getItem('start');
-  let startPos = st ? st.data.pos : null;
+  let startPos = opts.startPos || (st ? st.data.pos : null);
   if (!startPos) {
     toast('現在地を取得中…', 12000);
     startPos = await locate({ silent: true, center: false });
     if (!startPos) { toast('現在地を取得できません。出発地点を地図タップで指定してください'); setMode('start'); return false; }
   }
   const req = buildRouteRequest(startPos);
-  toast('経路検索中…', 30000);
+  if (!opts.auto) toast('経路検索中…', 30000);
   try {
     const url = `${CONFIG.VALHALLA_ROUTE_URL}?json=${encodeURIComponent(JSON.stringify(req))}`;
     if (url.length > 7000) throw new Error('リクエストURLが長すぎます(通行不可エリアが多すぎる可能性)。エリアを減らしてください');
     const j = await fetchJSON(url);
     const trip = j.trip, leg = trip && trip.legs && trip.legs[0];
     if (!leg) throw new Error('経路が見つかりませんでした');
-    clearRoute();
-    route = { shape: decodePolyline6(leg.shape), distKm: trip.summary.length, sec: trip.summary.time,
-      steps: leg.maneuvers.map(m => ({ text: m.instruction, km: m.length, sec: m.time })), excluded: (req.exclude_polygons || []).length, veh: getVehicle(), fromCurrent: !st };
+    clearRoute(true);
+    const shape = decodePolyline6(leg.shape), cum = [0];
+    for (let k = 1; k < shape.length; k++) cum.push(cum[k - 1] + haversine(shape[k - 1], shape[k]));
+    let acc = 0;
+    const steps = leg.maneuvers.map(m => {
+      const idx = typeof m.begin_shape_index === 'number' ? Math.min(m.begin_shape_index, shape.length - 1) : null;
+      const s = { text: m.instruction, say: m.verbal_pre_transition_instruction || m.instruction, type: m.type, km: m.length, sec: m.time, beginCum: idx != null ? cum[idx] : acc };
+      acc += (m.length || 0) * 1000; return s;
+    });
+    route = { shape, cum, total: cum[cum.length - 1], distKm: trip.summary.length, sec: trip.summary.time, steps,
+      excluded: (req.exclude_polygons || []).length, veh: getVehicle(), fromCurrent: !st && !opts.startPos };
     routeLayer = L.polyline(route.shape, { color: '#1b5e20', weight: 7, opacity: 0.85, interactive: false }).addTo(map);
-    map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] });
-    clearError('Valhalla'); showSheet('route');
-    runCheck('route', true);    // 経路案内タブは開いたまま、経路沿いの注意箇所を更新
+    clearError('Valhalla');
+    if (!opts.auto) { map.fitBounds(routeLayer.getBounds(), { padding: [30, 30] }); showSheet('route'); }
+    runCheck('route', opts.auto ? 'quiet' : true);    // 経路沿いの注意箇所を更新(ナビ中の再検索では画面を開かない)
+    updateNavStartBtn();
     return true;
   } catch (e) { setError('Valhalla', `経路検索に失敗しました: ${e.message}`); toast('経路検索に失敗しました'); return false; }
 }
-function clearRoute() { if (routeLayer) map.removeLayer(routeLayer); routeLayer = null; route = null; }
+function clearRoute(keepNav) { if (nav && !keepNav) stopNav(); if (routeLayer) map.removeLayer(routeLayer); routeLayer = null; route = null; updateNavStartBtn(); }
 
 /* ===== 下部シート(注意箇所一覧 / 経路案内) ===== */
 function showSheet(tab) { sheetTab = tab; renderSheet(); }
 function renderSheet() {
   const sh = $('#sheet');
-  if (!sheetTab) { sh.hidden = true; return; }
+  if (!sheetTab) { sh.hidden = true; updateNavStartBtn(); return; }
   sh.hidden = false;
   const body = h('div', { class: 'body' });
   if (sheetTab === 'check') {
@@ -738,6 +751,8 @@ function renderSheet() {
       h('ol', { class: 'steps' }, route.steps.map(s => h('li', {}, `${s.text}`, s.km ? ` (${fmtDist(s.km * 1000)})` : ''))),
       h('button', { class: 'find', onclick: () => { clearRoute(); renderSheet(); } }, '経路を消す'));
   }
+  if (route) body.prepend(h('button', { class: 'find navgo', onclick: startNav }, '▶ 案内を開始'));
+  updateNavStartBtn();
   sh.replaceChildren(h('div', { class: 'tabs' },
     h('button', { class: sheetTab === 'check' ? 'on' : '', onclick: () => showSheet('check') }, `注意箇所${findings.length ? `(${findings.length})` : ''}`),
     h('button', { class: sheetTab === 'route' ? 'on' : '', onclick: () => showSheet('route') }, '経路案内'),
@@ -752,6 +767,153 @@ $('#rowDraw').append(...DRAW_BTNS.map(([m, ic, tx]) => h('button', { class: 'tb'
 $('#rowAct').append(...ACT_BTNS.map(([id, ic, tx, fn]) => h('button', { class: 'tb', id: 'act-' + id, onclick: fn }, h('span', { class: 'ic' }, ic), tx)));
 $('#btnInc').onclick = () => openSettings(false);
 $('#btnVeh').onclick = openVehicle;
+
+/* =====================================================================
+ * 経路案内(ナビ): 現在地に追従し、次の曲がり角・距離・残り時間を表示、音声で案内する。
+ * 経路から外れたら自動で再検索。前方の通行注意箇所(赤・橙)も事前に知らせる。
+ * 位置は watchPosition で受け取る(画面を開いている間だけ動く。iPhone はロック中は止まる)。
+ * ===================================================================== */
+let voiceOn = jget(CONFIG.LS.voice, true) !== false;
+function speak(text) {
+  if (!voiceOn || !text || !('speechSynthesis' in window)) return;
+  try { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.lang = 'ja-JP'; u.rate = 1.0; speechSynthesis.speak(u); } catch (e) { /* 音声が使えなくても画面表示は続ける */ }
+}
+const distShort = m => m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.max(0, Math.round(m / (m < 100 ? 5 : 10)) * (m < 100 ? 5 : 10)) + ' m';
+const distSay = m => m >= 1000 ? `約${(m / 1000).toFixed(1)}キロメートル先` : `約${Math.max(10, Math.round(m / (m < 100 ? 10 : 50)) * (m < 100 ? 10 : 50))}メートル先`;
+function glyph(type) {      // Valhalla の曲がり方の種類 → 矢印
+  if ([4, 5, 6].includes(type)) return '🏁';
+  if ([12, 13].includes(type)) return '↶';
+  if ([2, 9, 10, 11, 18, 20, 23].includes(type)) return '↱';
+  if ([3, 14, 15, 16, 19, 21, 24].includes(type)) return '↰';
+  if ([26, 27].includes(type)) return '⟳';
+  return '⬆';
+}
+/** 経路上で現在位置に最も近い点。{d: 経路までの距離(m), s: 経路に沿った走行距離(m), i: 区間番号} */
+function projectOnRoute(pos, fromIdx) {
+  const sh = route.shape, cum = route.cum, k = Math.cos(pos[0] * Math.PI / 180), M = 111320;
+  let best = { d: Infinity, s: 0, i: 0 };
+  const scan = (a, b) => {
+    for (let i = a; i <= b; i++) {
+      const x1 = (sh[i][1] - pos[1]) * k * M, y1 = (sh[i][0] - pos[0]) * M, x2 = (sh[i + 1][1] - pos[1]) * k * M, y2 = (sh[i + 1][0] - pos[0]) * M;
+      const dx = x2 - x1, dy = y2 - y1, len2 = dx * dx + dy * dy;
+      const t = len2 ? Math.max(0, Math.min(1, -(x1 * dx + y1 * dy) / len2)) : 0;
+      const d = Math.hypot(x1 + t * dx, y1 + t * dy);
+      if (d < best.d) best = { d, s: cum[i] + t * (cum[i + 1] - cum[i]), i };
+    }
+  };
+  if (sh.length < 2) return best;
+  scan(Math.max(0, (fromIdx || 0) - 3), Math.min(sh.length - 2, (fromIdx || 0) + 300));    // まず直近の区間
+  if (best.d > 60) scan(0, sh.length - 2);                                                    // 外れていたら全体から探す
+  return best;
+}
+function updateNavStartBtn() { $('#navStart').hidden = !route || !!nav || !$('#sheet').hidden; }   // 一覧シートが開いているときは、シートの中のボタンを使う
+function startNav() {
+  if (!route || nav) return;
+  if (!navigator.geolocation) { toast('この端末では位置情報が使えないため案内できません', true); return; }
+  nav = { watchId: null, idx: 0, spoken: new Set(), off: 0, lastReroute: 0, rerouting: false, follow: true, cur: null, heading: null, stepNo: -1, alerted: new Set(), marker: null, wake: null };
+  document.body.classList.add('navigating');
+  setMode(null); sheetTab = null; renderSheet(); map.closePopup(); updateNavStartBtn();
+  $('#navTop').hidden = false; $('#navBottom').hidden = false;
+  drawNav({ glyph: glyph(route.steps[0] && route.steps[0].type), big: '現在地を取得中…', text: route.steps[0] ? route.steps[0].text : '' });
+  drawNavBottom(route.total);
+  speak('案内を開始します。' + (route.steps[0] ? route.steps[0].say : ''));      // クリック中に呼ぶ(iPhoneは操作の中でないと音が出ない)
+  nav.watchId = navigator.geolocation.watchPosition(onNavFix, onNavErr, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+  acquireWake();
+}
+function stopNav(msg) {
+  if (!nav) return;
+  const n = nav; nav = null;
+  navigator.geolocation.clearWatch(n.watchId);
+  if (n.marker) map.removeLayer(n.marker);
+  if (n.wake) { n.wake.release().catch(() => {}); }
+  try { speechSynthesis.cancel(); } catch (e) { /* 無視 */ }
+  document.body.classList.remove('navigating');
+  $('#navTop').hidden = true; $('#navBottom').hidden = true; updateNavStartBtn();
+  if (msg) toast(msg);
+}
+async function acquireWake() {            // 案内中は画面を消さない
+  try { if (nav && 'wakeLock' in navigator) nav.wake = await navigator.wakeLock.request('screen'); } catch (e) { /* 非対応・拒否は無視 */ }
+}
+document.addEventListener('visibilitychange', () => { if (nav && !document.hidden) acquireWake(); });
+map.on('dragstart', () => { if (nav) { nav.follow = false; drawNavBottom(); } });
+function onNavErr(err) {
+  if (!nav) return;
+  if (err.code === 1) { stopNav(); setError('現在地', '位置情報が許可されていないため案内を終了しました'); }
+  else toast('現在地を更新できません(電波の弱い場所かもしれません)');
+}
+function drawNav(o) {
+  $('#navTop').replaceChildren(
+    h('div', { class: 'ng' }, o.glyph || '⬆'),
+    h('div', { class: 'nt' }, h('div', { class: 'nd' }, o.big || ''), h('div', { class: 'nx' }, o.text || '')),
+    ...(o.warn ? [h('div', { class: 'nw' }, '⚠ ' + o.warn)] : []));
+}
+function drawNavBottom(remain) {
+  if (remain != null && nav) nav.remain = remain;
+  const rem = nav && nav.remain != null ? nav.remain : route.total;
+  const sec = route.sec * (route.total ? rem / route.total : 0), eta = new Date(Date.now() + sec * 1000);
+  $('#navBottom').replaceChildren(
+    h('div', { class: 'nsum' }, h('b', {}, distShort(rem)), ` ・ 約${Math.max(1, Math.round(sec / 60))}分 ・ ${eta.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit', hour12: false })}着`),
+    h('div', { class: 'nbtns' },
+      nav && !nav.follow ? h('button', { onclick: () => { nav.follow = true; if (nav.cur) map.setView(nav.cur, Math.max(map.getZoom(), 17)); drawNavBottom(); } }, '◎ 現在地') : null,
+      h('button', { id: 'navVoice', onclick: () => { voiceOn = !voiceOn; jset(CONFIG.LS.voice, voiceOn); if (!voiceOn) try { speechSynthesis.cancel(); } catch (e) { /* 無視 */ } else speak('音声案内をオンにしました'); drawNavBottom(); } }, voiceOn ? '🔊 音声' : '🔇 音声'),
+      h('button', { class: 'end', id: 'navEnd', onclick: () => stopNav('案内を終了しました') }, '終了')));
+}
+async function reroute(cur) {
+  nav.rerouting = true; nav.lastReroute = Date.now();
+  speak('ルートを外れました。再検索します');
+  drawNav({ glyph: '⟳', big: 'ルートを再検索中…', text: '' });
+  const ok = await runRoute({ startPos: cur, auto: true });
+  if (!nav) return;
+  nav.rerouting = false; nav.lastReroute = Date.now();
+  const latest = nav.pending; nav.pending = null;           // 再検索中に届いた最新の位置があればそれで判断する
+  if (ok) { nav.idx = 0; nav.spoken = new Set(); nav.alerted = new Set(); nav.stepNo = -1; nav.off = 0; onNavFix(latest || { coords: { latitude: cur[0], longitude: cur[1], accuracy: 5, heading: nav.heading } }); }
+  else { toast('再検索できませんでした。元の経路で案内を続けます', true); if (latest) onNavFix(latest); }
+}
+function onNavFix(pos) {
+  if (!nav || !route) return;
+  const cur = [r6(pos.coords.latitude), r6(pos.coords.longitude)], acc = pos.coords.accuracy || 0;
+  let hd = pos.coords.heading;
+  if (!(hd >= 0) && nav.cur && haversine(nav.cur, cur) > 5) hd = bearing(nav.cur, cur);
+  if (hd >= 0) nav.heading = hd;
+  nav.cur = cur;
+  jset(CONFIG.LS.lastpos, cur);
+  const icon = L.divIcon({ className: '', iconSize: [44, 44], iconAnchor: [22, 22], html: `<div class="navme" style="transform:rotate(${Math.round(nav.heading || 0)}deg)">▲</div>` });
+  if (nav.marker) { nav.marker.setLatLng(cur); nav.marker.setIcon(icon); } else nav.marker = L.marker(cur, { icon, zIndexOffset: 2000, interactive: false }).addTo(map);
+  if (meLayer) { map.removeLayer(meLayer); meLayer = null; }
+  if (nav.follow) map.setView(cur, Math.max(map.getZoom(), 17), { animate: true });
+  if (nav.rerouting) { nav.pending = pos; return; }
+  if (acc > 150) return;                              // 精度が悪いときは判断しない
+
+  const pr = projectOnRoute(cur, nav.idx); nav.idx = pr.i;
+  if (pr.d > 100 || (pr.d > Math.max(40, acc) && ++nav.off >= 3)) {
+    if (Date.now() - nav.lastReroute > 15000) { reroute(cur); return; }
+  } else if (pr.d <= Math.max(40, acc)) nav.off = 0;
+  const rest = route.total - pr.s;
+  if (rest < 25 || haversine(cur, route.shape[route.shape.length - 1]) < 25) { stopNav(); speak('目的地に到着しました'); toast('目的地に到着しました'); return; }
+
+  // いま走っている区間 k → 次に行う操作は steps[k+1]
+  let k = 0; while (k + 1 < route.steps.length && route.steps[k + 1].beginCum <= pr.s + 0.5) k++;
+  const next = route.steps[k + 1] || route.steps[k];
+  const toNext = Math.max(0, next.beginCum - pr.s);
+  if (nav.stepNo !== k) { nav.stepNo = k; nav.spoken = new Set(); }
+  for (const T of [500, 200, 50]) {                   // 手前の距離に入ったら、まだ言っていなければ案内する
+    if (toNext <= T && !nav.spoken.has(T)) { for (const U of [500, 200, 50]) if (U >= T) nav.spoken.add(U); speak(`${distSay(toNext)}、${next.say}`); break; }
+  }
+  // 前方の通行注意箇所を事前に知らせる
+  let warn = '';
+  for (const f of findings) {
+    if (f._r !== route) { const q = projectOnRoute(f.ll, 0); f._r = route; f.s = q.d < 60 ? q.s : null; }
+    if (f.s == null) continue;
+    const ahead = f.s - pr.s;
+    if (ahead > 0 && ahead <= 250) {
+      const say = `${f.sev === 'red' ? '通行困難の可能性' : '要確認'}の箇所があります。${f.reasons[0]}`;
+      if (!warn) warn = `${distShort(ahead)}先 ${f.reasons[0]}`;
+      if (!nav.alerted.has(f.id)) { nav.alerted.add(f.id); setTimeout(() => speak(`前方${distSay(ahead).replace('先', '')}に${say}`), 2500); }
+    }
+  }
+  drawNav({ glyph: glyph(next.type), big: distShort(toNext), text: next.text, warn });
+  drawNavBottom(rest);
+}
 
 /* ===== 初回(接続)画面 ===== */
 function decodeConn(code) {
@@ -819,6 +981,7 @@ async function start() {
     if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.5), { maxZoom: 17 });
   }
 }
+$('#navStart').onclick = startNav;
 $('#sync').onclick = () => { toast('同期します…'); poll(); };
 if (location.protocol.startsWith('http') && 'serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 updateInfo();

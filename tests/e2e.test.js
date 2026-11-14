@@ -23,7 +23,7 @@ async function setup(ctx) {
     const base = [35.681, 139.767];
     r.fulfill({ contentType: 'application/json', body: JSON.stringify({ elements: [
       { type: 'way', id: 1, center: { lat: base[0] + 0.001, lon: base[1] }, tags: { highway: 'residential', maxwidth: '2.0', name: '狭路A' } },      // 幅 2.0 < 車両2.3 → 赤
-      { type: 'way', id: 2, center: { lat: base[0] + 0.002, lon: base[1] }, tags: { highway: 'residential', maxheight: '3.2' } },                       // 高さ3.2, 車両3.0 → 橙(余裕0.2)
+      { type: 'way', id: 2, center: { lat: base[0] + 0.002, lon: base[1] - 0.0006 }, tags: { highway: 'residential', maxheight: '3.2' } },                       // 高さ3.2, 車両3.0 → 橙(余裕0.2)
       { type: 'node', id: 3, lat: base[0], lon: base[1] + 0.001, tags: { barrier: 'bollard' } },                                                         // 赤
       { type: 'node', id: 4, lat: base[0], lon: base[1] + 0.002, tags: { barrier: 'gate' } },                                                            // 橙
       { type: 'way', id: 5, center: { lat: base[0] - 0.001, lon: base[1] }, tags: { highway: 'service', access: 'private' } },                           // 橙
@@ -34,8 +34,8 @@ async function setup(ctx) {
   await ctx.route('**/valhalla1.openstreetmap.de/**', r => {
     mocks.valhalla.push(r.request().url());
     r.fulfill({ contentType: 'application/json', body: JSON.stringify({ trip: { summary: { length: 1.23, time: 300 }, legs: [{
-      shape: enc6([[35.680, 139.766], [35.681, 139.767], [35.682, 139.768]]),
-      maneuvers: [{ instruction: '北東に進む', length: 0.5, time: 100 }, { instruction: '目的地に到着です', length: 0.7, time: 200 }] }] } }) });
+      shape: enc6([[35.680, 139.766], [35.683, 139.766], [35.683, 139.769], [35.686, 139.769]]),
+      maneuvers: [{ instruction: '北東に進む', type: 1, begin_shape_index: 0, length: 0.33, time: 60 }, { instruction: '右折です', type: 10, begin_shape_index: 1, length: 0.27, time: 60 }, { instruction: '左折です', type: 15, begin_shape_index: 2, length: 0.33, time: 60 }, { instruction: '目的地に到着です', type: 4, begin_shape_index: 3, length: 0, time: 0 }] }] } }) });
   });
 }
 const tap = (page, fx, fy) => page.evaluate(([fx, fy]) => { const r = document.getElementById('map').getBoundingClientRect(); return [r.left + r.width * fx, r.top + r.height * fy]; }, [fx, fy]).then(([x, y]) => page.mouse.click(x, y));
@@ -237,6 +237,43 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   await Q.waitForFunction(() => /現在地を取得できません/.test(document.querySelector('#toast').textContent)); assert.ok(await Q.isVisible('#toast'));
   await Q.click('[data-mode=memo]'); await tap(Q, 0.5, 0.5); await Q.waitForSelector('#ov.on'); await answer(Q, '位置情報なしでも使える'); assert.equal((await items(Q)).length, 1); ok('位置情報が許可されなくても、メッセージを出して通常どおり使える');
   await g2.close();
+
+  // ================= 経路案内(ナビ) =================
+  const g3 = await browser.newContext({ viewport: { width: 390, height: 844 }, permissions: ['geolocation'], geolocation: { latitude: 35.6801, longitude: 139.7660 } });
+  await g3.addInitScript(() => { window.__spoken = []; Object.defineProperty(window, 'speechSynthesis', { value: { speak: u => window.__spoken.push(u.text), cancel() {} } }); window.SpeechSynthesisUtterance = function (t) { this.text = t; }; });
+  await setup(g3);
+  const N = await g3.newPage(); await N.goto(INDEX); await N.click('#btnLocal'); await N.waitForFunction(() => Math.abs(map.getCenter().lat - 35.6801) < 0.001);
+  mocks.valhalla.length = 0;
+  await N.click('[data-mode=goal]'); await tap(N, 0.6, 0.4); await N.waitForFunction(() => document.querySelector('#sheet .sum') && document.querySelector('.fd'));
+  assert.ok(await N.isVisible('#sheet .navgo')); ok('経路が出ると、シートに「案内を開始」ボタンが出る');
+  const say = () => N.evaluate(() => window.__spoken.slice());
+  for (const id of ['#navTop', '#navBottom']) assert.equal(await N.isVisible(id), false); ok('案内を始める前は、案内用のバナー・バーは見えない');
+  await N.click('#sheet .navgo');
+  assert.ok(await N.evaluate(() => document.body.classList.contains('navigating'))); assert.ok((await say())[0].includes('案内を開始します')); ok('案内開始(開始の音声は押した操作の中で出る)');
+  await N.waitForFunction(() => /右折です/.test(document.getElementById('navTop').textContent)); const top1 = await N.textContent('#navTop');
+  assert.ok(!/null|undefined/.test(top1), 'バナーに null が出ない'); assert.match(top1, /3[0-4]0 m/); assert.match(await N.textContent('#navTop .ng'), /↱/); assert.match(await N.textContent('#navBottom'), /残り|km|分/); ok('次の曲がり角(右折・約320m・矢印)と残り距離・時間・到着時刻を表示: ' + top1.replace(/\s+/g, ' ').slice(0, 40));
+  assert.ok((await say()).some(s => /メートル先、右折です/.test(s))); ok('500m以内に入ると音声で案内(距離+操作)');
+  assert.ok(await N.isVisible('#navTop')); assert.equal(await N.isVisible('#rowDraw'), false); ok('案内中は書き込みボタンを隠す');
+  const spokenBefore = (await say()).length;
+  await g3.setGeolocation({ latitude: 35.6820, longitude: 139.7660 });
+  await N.waitForFunction(() => /1[01]\d m|9\d m/.test(document.querySelector('#navTop .nd').textContent));
+  await N.waitForFunction(() => window.__spoken.some(s => /前方.*要確認の箇所があります/.test(s)), null, { timeout: 8000 }); assert.match(await N.textContent('#navTop .nw'), /⚠/);
+  assert.ok((await say()).length > spokenBefore); ok('200m手前の案内と、前方の通行注意箇所の事前警告(音声+画面)');
+  await g3.setGeolocation({ latitude: 35.68295, longitude: 139.7660 }); await N.waitForFunction(() => window.__spoken.filter(s => /右折です/.test(s)).length >= 3); ok('50m手前でもう一度案内(500m/200m/50mの3段階)');
+  await g3.setGeolocation({ latitude: 35.6831, longitude: 139.7664 });
+  await N.waitForFunction(() => /左折です/.test(document.getElementById('navTop').textContent)); assert.match(await N.textContent('#navTop .ng'), /↰/); ok('曲がり角を過ぎると次の案内(左折)に自動で切り替わる');
+  assert.equal(mocks.valhalla.length, 1);
+  await g3.setGeolocation({ latitude: 35.6840, longitude: 139.7720 });
+  await N.waitForFunction(() => window.__spoken.some(s => /再検索/.test(s))); for (let i = 0; i < 40 && mocks.valhalla.length < 2; i++) await N.waitForTimeout(100);
+  assert.equal(mocks.valhalla.length, 2); const rr = JSON.parse(new URL(mocks.valhalla[1]).searchParams.get('json')); assert.ok(Math.abs(rr.locations[0].lat - 35.684) < 1e-4 && Math.abs(rr.locations[0].lon - 139.772) < 1e-4); ok('経路から外れると自動でルート再検索(現在地から・同じ車両条件)');
+  await g3.setGeolocation({ latitude: 35.6860, longitude: 139.7690 });
+  await N.waitForFunction(() => !document.body.classList.contains('navigating'), null, { timeout: 8000 }); assert.ok((await say()).some(s => /到着/.test(s))); ok('目的地付近で「到着しました」と案内して終了');
+  assert.ok(await N.isVisible('#navStart')); ok('案内を終えると、地図上に「案内開始」ボタンが戻る'); await g3.setGeolocation({ latitude: 35.6812, longitude: 139.7660 }); await N.waitForTimeout(1300); await N.click('#navStart'); await N.waitForFunction(() => /右折です/.test(document.getElementById('navTop').textContent)); await N.click('#navEnd');
+  assert.equal(await N.evaluate(() => document.body.classList.contains('navigating')), false); for (const id of ['#navTop', '#navBottom']) assert.equal(await N.isVisible(id), false); ok('「終了」ボタンで案内を止められる(バナーも消える)');
+  await N.screenshot({ path: SHOT + '/shot-route.png' });
+  await g3.setGeolocation({ latitude: 35.6812, longitude: 139.7660 });
+  await N.click('#navStart'); await N.waitForFunction(() => /右折です/.test(document.getElementById('navTop').textContent)); await N.waitForTimeout(600); await N.screenshot({ path: SHOT + '/shot-nav.png' });
+  await g3.close();
 
   await page.screenshot({ path: SHOT + '/shot-main.png' });
   assert.deepEqual(pageErrors, []); ok('JSの未捕捉エラーなし');
