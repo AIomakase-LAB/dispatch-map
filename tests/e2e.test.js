@@ -180,9 +180,10 @@ async function answer(page, text) { if (text != null) await page.fill('#ov input
   async function device() { const c = await browser.newContext({ viewport: { width: 390, height: 844 } }); await setup(c); await gasRoute(c); const pg = await c.newPage(); await pg.goto(INDEX); return { c, pg }; }
   const dev1 = await device(), A = dev1.pg;
   await A.waitForSelector('#setup:not([hidden])');
-  await A.fill('#connCode', 'でたらめ'); await A.click('#btnConnect'); await A.waitForFunction(() => /形式が正しくありません/.test(document.querySelector('#toast').textContent)); ok('不正な接続コードは形式エラー');
+  await A.fill('#connCode', 'でたらめ'); await A.click('#btnConnect'); await A.waitForFunction(() => /形式が正しくありません/.test(document.querySelector('#toast').textContent)); assert.ok(await A.isVisible('#setupMsg')); assert.match(await A.textContent('#setupMsg'), /形式が正しくありません/); ok('不正な接続コードは形式エラー(接続画面の中に表示される)');
+  gasDown = true; await A.fill('#connCode', code); await A.click('#btnConnect'); await A.waitForFunction(() => /サーバーに接続できません/.test(document.querySelector('#setupMsg').textContent)); assert.ok(await A.isVisible('#setupMsg')); assert.equal(await A.textContent('#btnConnect'), '接続'); gasDown = false; ok('サーバーに届かないときは原因の候補つきで画面に表示され、再度押せる');
   const badKey = Buffer.from(JSON.stringify({ u: JSON.parse(Buffer.from(code.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString()).u, k: 'wrongkey' })).toString('base64');
-  await A.fill('#connCode', badKey); await A.click('#btnConnect'); await A.waitForFunction(() => /接続コードが違います/.test(document.querySelector('#toast').textContent)); ok('キー違いは「接続コードが違います」');
+  await A.fill('#connCode', badKey); await A.click('#btnConnect'); await A.waitForFunction(() => /接続コードが違います/.test(document.querySelector('#setupMsg').textContent)); ok('キー違いは「接続コードが違います」(接続画面に表示)');
   await A.fill('#connCode', code); await A.click('#btnConnect'); await A.waitForSelector('#ov.on');
   await A.fill('#ov input >> nth=0', '火災出動'); await A.fill('#ov input >> nth=1', '指揮隊'); await A.click('#ov .btns .pri'); await A.waitForFunction(() => !document.querySelector('#ov.on'));
   assert.match(await A.textContent('#sync'), /同期済み/); ok('接続コードで接続・同期済み表示');

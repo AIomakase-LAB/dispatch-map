@@ -128,8 +128,8 @@ const netError = msg => Object.assign(new Error(msg), { network: true });
 function api(action, payload) {
   // 本文は text/plain の単純リクエストなのでCORSのプリフライトが起きない
   return fetch(conn.u, { method: 'POST', body: JSON.stringify({ key: conn.k, action, payload: payload || {} }), redirect: 'follow' })
-    .then(r => { if (!r.ok) throw netError('HTTP ' + r.status); return r.json().catch(() => { throw netError('応答を読めませんでした'); }); },
-      () => { throw netError('オフラインです'); })
+    .then(r => { if (!r.ok) throw netError('HTTP ' + r.status); return r.json().catch(() => { throw netError('応答を読めませんでした(ウェブアプリのアクセス権が「全員」か確認してください)'); }); },
+      () => { throw netError(navigator.onLine === false ? 'オフラインです' : 'サーバーに接続できません(URLが違う、またはウェブアプリのアクセス権が「全員」になっていない可能性があります)'); })
     .then(j => { if (!j.ok) { const e = new Error(j.error || 'エラー'); e.auth = !!j.auth; throw e; } return j.data; });
 }
 function persistRow(row) {
@@ -747,28 +747,34 @@ function decodeConn(code) {
 function showSetup() {
   const box = $('#setup'), ta = h('textarea', { rows: 3, id: 'connCode', placeholder: 'eyJ1Ijoi…', autocapitalize: 'off', autocorrect: 'off', spellcheck: 'false' });
   const go = h('button', { class: 'big', id: 'btnConnect', onclick: () => connect(go, ta.value) }, '接続');
+  const msg = h('div', { id: 'setupMsg', class: 'setup-msg', role: 'alert', hidden: true });
   box.replaceChildren(h('div', { class: 'inner' },
     h('img', { class: 'logo', src: 'icons/icon-192.png', alt: '' }), h('h1', {}, '出動支援マップ'),
     h('div', { class: 'muted' }, '進入方向・通行不可エリア・車両別の通行注意箇所を地図に書き込み、自分の端末間で共有します。'),
     h('div', { class: 'card' }, h('b', {}, 'はじめての接続'),
       h('ol', {}, h('li', {}, 'Apps Script の Web アプリ URL(/exec)をブラウザで開く'), h('li', {}, '案内に出るスプレッドシートを開き、「設定」シートの B2(接続コード)をコピー'), h('li', {}, '下に貼り付けて「接続」')),
-      h('label', { class: 'muted' }, '接続コード'), ta, go),
+      h('label', { class: 'muted' }, '接続コード'), ta, go, msg),
     h('button', { class: 'ghost', id: 'btnLocal', onclick: () => { conn = { local: true }; jset(CONFIG.LS.conn, conn); start(); } }, '接続せずローカルで試す(この端末のみ)'),
     isLocal() || conn ? h('button', { class: 'ghost', onclick: () => { box.hidden = true; } }, '閉じる') : null,
     h('p', { class: 'muted' }, 'ホーム画面に追加してから接続すると、アプリとして全画面で使えます。')));
   box.hidden = false;
 }
+function setupMsg(text, bad) {
+  const m = $('#setupMsg'); if (!m) return;
+  m.textContent = text || ''; m.hidden = !text; m.className = 'setup-msg' + (bad ? ' bad' : '');
+}
 async function connect(btn, code) {
-  let c; try { c = decodeConn(code); } catch (e) { toast('接続コードの形式が正しくありません', true); return; }
-  btn.disabled = true; btn.textContent = '接続中…';
+  let c; try { c = decodeConn(code); } catch (e) { const m = '接続コードの形式が正しくありません。「設定」シートの B2 をそのままコピーして貼り付けてください(前後の文字を含めない)。'; setupMsg(m, true); toast(m, true); return; }
+  btn.disabled = true; btn.textContent = '接続中…'; setupMsg('接続しています…');
   const prev = conn; conn = c;
   try {
     await api('getItems', { incident: state.incident });          // つながるか・キーが合っているか確認
     jset(CONFIG.LS.conn, c); outbox = []; jset(CONFIG.LS.outbox, []);
-    switchIncidentClean(); toast('接続しました'); start();
+    switchIncidentClean(); setupMsg(''); toast('接続しました'); start();
   } catch (e) {
     conn = prev; btn.disabled = false; btn.textContent = '接続';
-    toast(e.auth ? '接続コードが違います' : `接続できませんでした(${e.message})`, true);
+    const m = e.auth ? '接続コードが違います。API_KEY を作り直した場合は新しいコードを貼ってください。' : `接続できませんでした: ${e.message}`;
+    setupMsg(m, true); toast(m, true);
   }
 }
 function switchIncidentClean() {
